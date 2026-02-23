@@ -162,6 +162,13 @@ async function generateRpc(schemaPath?: string): Promise<void> {
     typesCode = typesCode.replace(/except:/g, "except Exception:");
     // Remove unnecessary pass when class has methods (quicktype generates pass for empty schemas)
     typesCode = typesCode.replace(/^(\s*)pass\n\n(\s*@staticmethod)/gm, "$2");
+    // Fix from_bool() calls to handle missing/null boolean fields gracefully.
+    // The API may return null or omit boolean fields for some models; default to False.
+    typesCode = typesCode.replace(
+        /(\w+) = from_bool\(obj\.get\("([^"]+)"\)\)/g,
+        (_, varName, jsonKey) =>
+            `${varName}_raw = obj.get("${jsonKey}")\n        ${varName} = bool(${varName}_raw) if ${varName}_raw is not None else False`
+    );
 
     const lines: string[] = [];
     lines.push(`"""

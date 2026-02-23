@@ -169,8 +169,10 @@ class Supports:
     @staticmethod
     def from_dict(obj: Any) -> 'Supports':
         assert isinstance(obj, dict)
-        reasoning_effort = from_bool(obj.get("reasoningEffort"))
-        vision = from_bool(obj.get("vision"))
+        reasoning_effort_raw = obj.get("reasoningEffort")
+        reasoning_effort = bool(reasoning_effort_raw) if reasoning_effort_raw is not None else False
+        vision_raw = obj.get("vision")
+        vision = bool(vision_raw) if vision_raw is not None else False
         return Supports(reasoning_effort, vision)
 
     def to_dict(self) -> dict:
