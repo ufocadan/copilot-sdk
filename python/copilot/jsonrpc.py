@@ -10,9 +10,8 @@ import inspect
 import json
 import threading
 import uuid
-from collections.abc import Awaitable
-from typing import Any, Optional, Union
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 
 class JsonRpcError(Exception):
@@ -31,7 +30,7 @@ class ProcessExitedError(Exception):
     pass
 
 
-RequestHandler = Callable[[dict], Union[dict, Awaitable[dict]]]
+RequestHandler = Callable[[dict], dict | Awaitable[dict]]
 
 
 class JsonRpcClient:
@@ -104,9 +103,7 @@ class JsonRpcClient:
         if self._stderr_thread:
             self._stderr_thread.join(timeout=1.0)
 
-    async def request(
-        self, method: str, params: dict | None = None, timeout: float = 30.0
-    ) -> Any:
+    async def request(self, method: str, params: dict | None = None, timeout: float = 30.0) -> Any:
         """
         Send a JSON-RPC request and wait for response
 

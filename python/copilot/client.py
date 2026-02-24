@@ -19,10 +19,10 @@ import re
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any, Optional, cast
-from collections.abc import Callable
+from typing import Any, cast
 
 from .generated.rpc import ServerRpc
 from .generated.session_events import session_event_from_dict

@@ -61,9 +61,6 @@ select = [
     "I",  # isort
     "UP", # pyupgrade
 ]
-ignore = [
-    "UP006",
-]
 
 [tool.ruff.format]
 quote-style = "double"

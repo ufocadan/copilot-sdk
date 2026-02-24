@@ -8,8 +8,8 @@ conversation sessions with the Copilot CLI.
 import asyncio
 import inspect
 import threading
-from typing import Any, Optional
 from collections.abc import Callable
+from typing import Any
 
 from .generated.rpc import SessionRpc
 from .generated.session_events import SessionEvent, SessionEventType, session_event_from_dict
@@ -192,9 +192,7 @@ class CopilotSession:
                 raise error_event
             return last_assistant_message
         except TimeoutError:
-            raise TimeoutError(
-                f"Timeout after {effective_timeout}s waiting for session.idle"
-            )
+            raise TimeoutError(f"Timeout after {effective_timeout}s waiting for session.idle")
         finally:
             unsubscribe()
 

@@ -9,7 +9,7 @@ import os
 import platform
 import re
 import subprocess
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 

@@ -9,7 +9,6 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 from copilot import CopilotClient
 
