@@ -44,7 +44,20 @@ client = CopilotClient({"log_level": "debug"})
 <details>
 <summary><strong>Go</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```go
+package main
+
+import copilot "github.com/github/copilot-sdk/go"
+
+func main() {
+	client := copilot.NewClient(&copilot.ClientOptions{
+		LogLevel: "debug",
+	})
+	_ = client
+}
+```
+<!-- /docs-validate: hidden -->
 ```go
 import copilot "github.com/github/copilot-sdk/go"
 
@@ -58,7 +71,27 @@ client := copilot.NewClient(&copilot.ClientOptions{
 <details>
 <summary><strong>.NET</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```csharp
+using GitHub.Copilot.SDK;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+
+public static class LoggingExample
+{
+    public static void Main()
+    {
+        // Using ILogger (NullLogger used here for compilation; replace with real logger in production)
+        var client = new CopilotClient(new CopilotClientOptions
+        {
+            LogLevel = "debug",
+            Logger = NullLogger.Instance,
+        });
+        _ = client;
+    }
+}
+```
+<!-- /docs-validate: hidden -->
 ```csharp
 using GitHub.Copilot.SDK;
 using Microsoft.Extensions.Logging;

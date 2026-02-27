@@ -38,7 +38,19 @@ PostToolUseHandler = Callable[
 <details>
 <summary><strong>Go</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```go
+package main
+
+import copilot "github.com/github/copilot-sdk/go"
+
+var _ copilot.PostToolUseHandler = func(input copilot.PostToolUseHookInput, invocation copilot.HookInvocation) (*copilot.PostToolUseHookOutput, error) {
+	return nil, nil
+}
+
+func main() {}
+```
+<!-- /docs-validate: hidden -->
 ```go
 type PostToolUseHandler func(
     input PostToolUseHookInput,
@@ -51,7 +63,13 @@ type PostToolUseHandler func(
 <details>
 <summary><strong>.NET</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```csharp
+using GitHub.Copilot.SDK;
+
+public static class PostToolUseHookTypes { static PostToolUseHandler? example = null; }
+```
+<!-- /docs-validate: hidden -->
 ```csharp
 public delegate Task<PostToolUseHookOutput?> PostToolUseHandler(
     PostToolUseHookInput input,
@@ -122,7 +140,36 @@ session = await client.create_session({
 <details>
 <summary><strong>Go</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+
+	copilot "github.com/github/copilot-sdk/go"
+)
+
+func main() {
+	client := copilot.NewClient(nil)
+	client.Start(context.Background())
+	defer client.Stop()
+
+	session, _ := client.CreateSession(context.Background(), &copilot.SessionConfig{
+		Hooks: &copilot.SessionHooks{
+			OnPostToolUse: func(input copilot.PostToolUseHookInput, inv copilot.HookInvocation) (*copilot.PostToolUseHookOutput, error) {
+				fmt.Printf("[%s] Tool: %s\n", inv.SessionID, input.ToolName)
+				fmt.Printf("  Args: %v\n", input.ToolArgs)
+				fmt.Printf("  Result: %v\n", input.ToolResult)
+				return nil, nil
+			},
+		},
+	})
+	_ = session
+}
+```
+<!-- /docs-validate: hidden -->
 ```go
 session, _ := client.CreateSession(context.Background(), &copilot.SessionConfig{
     Hooks: &copilot.SessionHooks{
@@ -141,7 +188,33 @@ session, _ := client.CreateSession(context.Background(), &copilot.SessionConfig{
 <details>
 <summary><strong>.NET</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```csharp
+using GitHub.Copilot.SDK;
+
+public static class PostToolUseExample
+{
+    public static async Task Main()
+    {
+        await using var client = new CopilotClient();
+        var session = await client.CreateSessionAsync(new SessionConfig
+        {
+            Hooks = new SessionHooks
+            {
+                OnPostToolUse = (input, invocation) =>
+                {
+                    Console.WriteLine($"[{invocation.SessionId}] Tool: {input.ToolName}");
+                    Console.WriteLine($"  Args: {input.ToolArgs}");
+                    Console.WriteLine($"  Result: {input.ToolResult}");
+                    return Task.FromResult<PostToolUseHookOutput?>(null);
+                },
+            },
+        });
+        _ = session;
+    }
+}
+```
+<!-- /docs-validate: hidden -->
 ```csharp
 var session = await client.CreateSessionAsync(new SessionConfig
 {

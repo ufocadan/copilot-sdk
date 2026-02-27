@@ -38,7 +38,19 @@ UserPromptSubmittedHandler = Callable[
 <details>
 <summary><strong>Go</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```go
+package main
+
+import copilot "github.com/github/copilot-sdk/go"
+
+var _ copilot.UserPromptSubmittedHandler = func(input copilot.UserPromptSubmittedHookInput, invocation copilot.HookInvocation) (*copilot.UserPromptSubmittedHookOutput, error) {
+	return nil, nil
+}
+
+func main() {}
+```
+<!-- /docs-validate: hidden -->
 ```go
 type UserPromptSubmittedHandler func(
     input UserPromptSubmittedHookInput,
@@ -51,7 +63,13 @@ type UserPromptSubmittedHandler func(
 <details>
 <summary><strong>.NET</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```csharp
+using GitHub.Copilot.SDK;
+
+public static class UserPromptSubmittedHookTypes { static UserPromptSubmittedHandler? example = null; }
+```
+<!-- /docs-validate: hidden -->
 ```csharp
 public delegate Task<UserPromptSubmittedHookOutput?> UserPromptSubmittedHandler(
     UserPromptSubmittedHookInput input,
@@ -116,7 +134,34 @@ session = await client.create_session({
 <details>
 <summary><strong>Go</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+
+	copilot "github.com/github/copilot-sdk/go"
+)
+
+func main() {
+	client := copilot.NewClient(nil)
+	client.Start(context.Background())
+	defer client.Stop()
+
+	session, _ := client.CreateSession(context.Background(), &copilot.SessionConfig{
+		Hooks: &copilot.SessionHooks{
+			OnUserPromptSubmitted: func(input copilot.UserPromptSubmittedHookInput, inv copilot.HookInvocation) (*copilot.UserPromptSubmittedHookOutput, error) {
+				fmt.Printf("[%s] User: %s\n", inv.SessionID, input.Prompt)
+				return nil, nil
+			},
+		},
+	})
+	_ = session
+}
+```
+<!-- /docs-validate: hidden -->
 ```go
 session, _ := client.CreateSession(context.Background(), &copilot.SessionConfig{
     Hooks: &copilot.SessionHooks{
@@ -133,7 +178,31 @@ session, _ := client.CreateSession(context.Background(), &copilot.SessionConfig{
 <details>
 <summary><strong>.NET</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```csharp
+using GitHub.Copilot.SDK;
+
+public static class UserPromptSubmittedExample
+{
+    public static async Task Main()
+    {
+        await using var client = new CopilotClient();
+        var session = await client.CreateSessionAsync(new SessionConfig
+        {
+            Hooks = new SessionHooks
+            {
+                OnUserPromptSubmitted = (input, invocation) =>
+                {
+                    Console.WriteLine($"[{invocation.SessionId}] User: {input.Prompt}");
+                    return Task.FromResult<UserPromptSubmittedHookOutput?>(null);
+                },
+            },
+        });
+        _ = session;
+    }
+}
+```
+<!-- /docs-validate: hidden -->
 ```csharp
 var session = await client.CreateSessionAsync(new SessionConfig
 {

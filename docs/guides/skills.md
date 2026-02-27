@@ -170,7 +170,29 @@ session = await client.create_session({
 <details>
 <summary><strong>Go</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```go
+package main
+
+import (
+	"context"
+
+	copilot "github.com/github/copilot-sdk/go"
+)
+
+func main() {
+	client := copilot.NewClient(nil)
+	client.Start(context.Background())
+	defer client.Stop()
+
+	session, _ := client.CreateSession(context.Background(), &copilot.SessionConfig{
+		SkillDirectories: []string{"./skills"},
+		DisabledSkills:   []string{"experimental-feature", "deprecated-tool"},
+	})
+	_ = session
+}
+```
+<!-- /docs-validate: hidden -->
 ```go
 session, _ := client.CreateSession(context.Background(), &copilot.SessionConfig{
     SkillDirectories: []string{"./skills"},
@@ -183,7 +205,25 @@ session, _ := client.CreateSession(context.Background(), &copilot.SessionConfig{
 <details>
 <summary><strong>.NET</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```csharp
+using GitHub.Copilot.SDK;
+
+public static class SkillsExample
+{
+    public static async Task Main()
+    {
+        await using var client = new CopilotClient();
+        var session = await client.CreateSessionAsync(new SessionConfig
+        {
+            SkillDirectories = new List<string> { "./skills" },
+            DisabledSkills = new List<string> { "experimental-feature", "deprecated-tool" },
+        });
+        _ = session;
+    }
+}
+```
+<!-- /docs-validate: hidden -->
 ```csharp
 var session = await client.CreateSessionAsync(new SessionConfig
 {

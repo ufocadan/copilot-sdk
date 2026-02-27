@@ -165,7 +165,18 @@ await session.send({"prompt": "Hello"})
 ```
 
 **Event Data Structure:**
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```python
+from dataclasses import dataclass
+
+@dataclass
+class Usage:
+    input_tokens: float
+    output_tokens: float
+    cache_read_tokens: float
+    cache_write_tokens: float
+```
+<!-- /docs-validate: hidden -->
 ```python
 @dataclass
 class Usage:

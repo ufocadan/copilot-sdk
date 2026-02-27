@@ -42,7 +42,19 @@ SessionStartHandler = Callable[
 <details>
 <summary><strong>Go</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```go
+package main
+
+import copilot "github.com/github/copilot-sdk/go"
+
+var _ copilot.SessionStartHandler = func(input copilot.SessionStartHookInput, invocation copilot.HookInvocation) (*copilot.SessionStartHookOutput, error) {
+	return nil, nil
+}
+
+func main() {}
+```
+<!-- /docs-validate: hidden -->
 ```go
 type SessionStartHandler func(
     input SessionStartHookInput,
@@ -55,7 +67,13 @@ type SessionStartHandler func(
 <details>
 <summary><strong>.NET</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```csharp
+using GitHub.Copilot.SDK;
+
+public static class SessionStartHookTypes { static SessionStartHandler? example = null; }
+```
+<!-- /docs-validate: hidden -->
 ```csharp
 public delegate Task<SessionStartHookOutput?> SessionStartHandler(
     SessionStartHookInput input,
@@ -221,7 +239,19 @@ SessionEndHandler = Callable[
 <details>
 <summary><strong>Go</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```go
+package main
+
+import copilot "github.com/github/copilot-sdk/go"
+
+var _ copilot.SessionEndHandler = func(input copilot.SessionEndHookInput, invocation copilot.HookInvocation) (*copilot.SessionEndHookOutput, error) {
+	return nil, nil
+}
+
+func main() {}
+```
+<!-- /docs-validate: hidden -->
 ```go
 type SessionEndHandler func(
     input SessionEndHookInput,

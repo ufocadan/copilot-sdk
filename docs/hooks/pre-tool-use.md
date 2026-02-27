@@ -38,7 +38,19 @@ PreToolUseHandler = Callable[
 <details>
 <summary><strong>Go</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```go
+package main
+
+import copilot "github.com/github/copilot-sdk/go"
+
+var _ copilot.PreToolUseHandler = func(input copilot.PreToolUseHookInput, invocation copilot.HookInvocation) (*copilot.PreToolUseHookOutput, error) {
+	return nil, nil
+}
+
+func main() {}
+```
+<!-- /docs-validate: hidden -->
 ```go
 type PreToolUseHandler func(
     input PreToolUseHookInput,
@@ -51,7 +63,13 @@ type PreToolUseHandler func(
 <details>
 <summary><strong>.NET</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```csharp
+using GitHub.Copilot.SDK;
+
+public static class PreToolUseHookTypes { static PreToolUseHandler? example = null; }
+```
+<!-- /docs-validate: hidden -->
 ```csharp
 public delegate Task<PreToolUseHookOutput?> PreToolUseHandler(
     PreToolUseHookInput input,
@@ -129,7 +147,37 @@ session = await client.create_session({
 <details>
 <summary><strong>Go</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+
+	copilot "github.com/github/copilot-sdk/go"
+)
+
+func main() {
+	client := copilot.NewClient(nil)
+	client.Start(context.Background())
+	defer client.Stop()
+
+	session, _ := client.CreateSession(context.Background(), &copilot.SessionConfig{
+		Hooks: &copilot.SessionHooks{
+			OnPreToolUse: func(input copilot.PreToolUseHookInput, inv copilot.HookInvocation) (*copilot.PreToolUseHookOutput, error) {
+				fmt.Printf("[%s] Calling %s\n", inv.SessionID, input.ToolName)
+				fmt.Printf("  Args: %v\n", input.ToolArgs)
+				return &copilot.PreToolUseHookOutput{
+					PermissionDecision: "allow",
+				}, nil
+			},
+		},
+	})
+	_ = session
+}
+```
+<!-- /docs-validate: hidden -->
 ```go
 session, _ := client.CreateSession(context.Background(), &copilot.SessionConfig{
     Hooks: &copilot.SessionHooks{
@@ -149,7 +197,34 @@ session, _ := client.CreateSession(context.Background(), &copilot.SessionConfig{
 <details>
 <summary><strong>.NET</strong></summary>
 
-<!-- docs-validate: skip -->
+<!-- docs-validate: hidden -->
+```csharp
+using GitHub.Copilot.SDK;
+
+public static class PreToolUseExample
+{
+    public static async Task Main()
+    {
+        await using var client = new CopilotClient();
+        var session = await client.CreateSessionAsync(new SessionConfig
+        {
+            Hooks = new SessionHooks
+            {
+                OnPreToolUse = (input, invocation) =>
+                {
+                    Console.WriteLine($"[{invocation.SessionId}] Calling {input.ToolName}");
+                    Console.WriteLine($"  Args: {input.ToolArgs}");
+                    return Task.FromResult<PreToolUseHookOutput?>(
+                        new PreToolUseHookOutput { PermissionDecision = "allow" }
+                    );
+                },
+            },
+        });
+        _ = session;
+    }
+}
+```
+<!-- /docs-validate: hidden -->
 ```csharp
 var session = await client.CreateSessionAsync(new SessionConfig
 {
