@@ -7,6 +7,6 @@ See [GitHub Releases](https://github.com/github/copilot-sdk/releases) for the fu
 
 ## [v0.1.29](https://github.com/github/copilot-sdk/releases/tag/v0.1.29) (2026-02-27)
 
-### Other changes
+### Changes
 
 - bugfix: **[Python]** `CopilotClient.stop()` now raises an `ExceptionGroup` instead of silently returning a list of exceptions ([#603](https://github.com/github/copilot-sdk/pull/603))
