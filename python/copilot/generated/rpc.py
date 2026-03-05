@@ -468,16 +468,20 @@ class SessionModelSwitchToResult:
 @dataclass
 class SessionModelSwitchToParams:
     model_id: str
+    reasoning_effort: str | None = None
 
     @staticmethod
     def from_dict(obj: Any) -> 'SessionModelSwitchToParams':
         assert isinstance(obj, dict)
         model_id = from_str(obj.get("modelId"))
-        return SessionModelSwitchToParams(model_id)
+        reasoning_effort = from_union([from_str, from_none], obj.get("reasoningEffort"))
+        return SessionModelSwitchToParams(model_id, reasoning_effort)
 
     def to_dict(self) -> dict:
         result: dict = {}
         result["modelId"] = from_str(self.model_id)
+        if self.reasoning_effort is not None:
+            result["reasoningEffort"] = from_str(self.reasoning_effort)
         return result
 
 

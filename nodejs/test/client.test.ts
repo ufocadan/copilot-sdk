@@ -113,6 +113,55 @@ describe("CopilotClient", () => {
         spy.mockRestore();
     });
 
+    it("sends session.model.switchTo RPC with reasoningEffort when provided", async () => {
+        const client = new CopilotClient();
+        await client.start();
+        onTestFinished(() => client.forceStop());
+
+        const session = await client.createSession({ onPermissionRequest: approveAll });
+
+        // Mock sendRequest to capture the call without hitting the runtime
+        const spy = vi
+            .spyOn((client as any).connection!, "sendRequest")
+            .mockImplementation(async (method: string, _params: any) => {
+                if (method === "session.model.switchTo") return {};
+                throw new Error(`Unexpected method: ${method}`);
+            });
+
+        await session.setModel("gpt-4.1", "high");
+
+        expect(spy).toHaveBeenCalledWith("session.model.switchTo", {
+            sessionId: session.sessionId,
+            modelId: "gpt-4.1",
+            reasoningEffort: "high",
+        });
+
+        spy.mockRestore();
+    });
+
+    it("sends session.model.switchTo RPC without reasoningEffort when not provided", async () => {
+        const client = new CopilotClient();
+        await client.start();
+        onTestFinished(() => client.forceStop());
+
+        const session = await client.createSession({ onPermissionRequest: approveAll });
+
+        // Mock sendRequest to capture the call without hitting the runtime
+        const spy = vi
+            .spyOn((client as any).connection!, "sendRequest")
+            .mockImplementation(async (method: string, params: any) => {
+                if (method === "session.model.switchTo") return {};
+                throw new Error(`Unexpected method: ${method}`);
+            });
+
+        await session.setModel("gpt-4.1");
+
+        const callArgs = spy.mock.calls[0][1] as Record<string, unknown>;
+        expect(callArgs).not.toHaveProperty("reasoningEffort");
+
+        spy.mockRestore();
+    });
+
     describe("URL parsing", () => {
         it("should parse port-only URL format", () => {
             const client = new CopilotClient({

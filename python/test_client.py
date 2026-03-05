@@ -314,5 +314,33 @@ class TestSessionConfigForwarding:
             await session.set_model("gpt-4.1")
             assert captured["session.model.switchTo"]["sessionId"] == session.session_id
             assert captured["session.model.switchTo"]["modelId"] == "gpt-4.1"
+            assert "reasoningEffort" not in captured["session.model.switchTo"]
+        finally:
+            await client.force_stop()
+
+    @pytest.mark.asyncio
+    async def test_set_model_with_reasoning_effort_sends_correct_rpc(self):
+        client = CopilotClient({"cli_path": CLI_PATH})
+        await client.start()
+
+        try:
+            session = await client.create_session(
+                {"on_permission_request": PermissionHandler.approve_all}
+            )
+
+            captured = {}
+            original_request = client._client.request
+
+            async def mock_request(method, params):
+                captured[method] = params
+                if method == "session.model.switchTo":
+                    return {}
+                return await original_request(method, params)
+
+            client._client.request = mock_request
+            await session.set_model("gpt-4.1", "high")
+            assert captured["session.model.switchTo"]["sessionId"] == session.session_id
+            assert captured["session.model.switchTo"]["modelId"] == "gpt-4.1"
+            assert captured["session.model.switchTo"]["reasoningEffort"] == "high"
         finally:
             await client.force_stop()

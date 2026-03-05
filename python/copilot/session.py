@@ -17,6 +17,7 @@ from .types import (
     MessageOptions,
     PermissionRequest,
     PermissionRequestResult,
+    ReasoningEffort,
     SessionHooks,
     Tool,
     ToolHandler,
@@ -521,7 +522,7 @@ class CopilotSession:
         """
         await self._client.request("session.abort", {"sessionId": self.session_id})
 
-    async def set_model(self, model: str) -> None:
+    async def set_model(self, model: str, reasoning_effort: ReasoningEffort | None = None) -> None:
         """
         Change the model for this session.
 
@@ -530,11 +531,14 @@ class CopilotSession:
 
         Args:
             model: Model ID to switch to (e.g., "gpt-4.1", "claude-sonnet-4").
+            reasoning_effort: Optional reasoning effort level for models that support it
+                (e.g., "low", "medium", "high", "xhigh").
 
         Raises:
             Exception: If the session has been destroyed or the connection fails.
 
         Example:
             >>> await session.set_model("gpt-4.1")
+            >>> await session.set_model("gpt-4.1", "high")
         """
-        await self.rpc.model.switch_to(SessionModelSwitchToParams(model_id=model))
+        await self.rpc.model.switch_to(SessionModelSwitchToParams(model_id=model, reasoning_effort=reasoning_effort))

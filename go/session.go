@@ -579,14 +579,21 @@ func (s *Session) Abort(ctx context.Context) error {
 
 // SetModel changes the model for this session.
 // The new model takes effect for the next message. Conversation history is preserved.
+// The optional reasoningEffort parameter sets the reasoning effort level for models that support it
+// (e.g., "low", "medium", "high", "xhigh"). Pass nil to omit it.
 //
 // Example:
 //
-//	if err := session.SetModel(context.Background(), "gpt-4.1"); err != nil {
+//	if err := session.SetModel(context.Background(), "gpt-4.1", nil); err != nil {
 //	    log.Printf("Failed to set model: %v", err)
 //	}
-func (s *Session) SetModel(ctx context.Context, model string) error {
-	_, err := s.RPC.Model.SwitchTo(ctx, &rpc.SessionModelSwitchToParams{ModelID: model})
+//
+//	effort := "high"
+//	if err := session.SetModel(context.Background(), "gpt-4.1", &effort); err != nil {
+//	    log.Printf("Failed to set model: %v", err)
+//	}
+func (s *Session) SetModel(ctx context.Context, model string, reasoningEffort *string) error {
+	_, err := s.RPC.Model.SwitchTo(ctx, &rpc.SessionModelSwitchToParams{ModelID: model, ReasoningEffort: reasoningEffort})
 	if err != nil {
 		return fmt.Errorf("failed to set model: %w", err)
 	}

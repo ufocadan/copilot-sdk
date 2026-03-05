@@ -129,7 +129,8 @@ type SessionModelSwitchToResult struct {
 }
 
 type SessionModelSwitchToParams struct {
-	ModelID string `json:"modelId"`
+	ModelID         string  `json:"modelId"`
+	ReasoningEffort *string `json:"reasoningEffort,omitempty"`
 }
 
 type SessionModeGetResult struct {
@@ -365,6 +366,9 @@ func (a *ModelRpcApi) SwitchTo(ctx context.Context, params *SessionModelSwitchTo
 	req := map[string]interface{}{"sessionId": a.sessionID}
 	if params != nil {
 		req["modelId"] = params.ModelID
+		if params.ReasoningEffort != nil {
+			req["reasoningEffort"] = *params.ReasoningEffort
+		}
 	}
 	raw, err := a.client.Request("session.model.switchTo", req)
 	if err != nil {

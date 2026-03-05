@@ -217,6 +217,9 @@ internal class SessionModelSwitchToRequest
 
     [JsonPropertyName("modelId")]
     public string ModelId { get; set; } = string.Empty;
+
+    [JsonPropertyName("reasoningEffort")]
+    public string? ReasoningEffort { get; set; }
 }
 
 public class SessionModeGetResult
@@ -615,9 +618,9 @@ public class ModelApi
     }
 
     /// <summary>Calls "session.model.switchTo".</summary>
-    public async Task<SessionModelSwitchToResult> SwitchToAsync(string modelId, CancellationToken cancellationToken = default)
+    public async Task<SessionModelSwitchToResult> SwitchToAsync(string modelId, string? reasoningEffort = null, CancellationToken cancellationToken = default)
     {
-        var request = new SessionModelSwitchToRequest { SessionId = _sessionId, ModelId = modelId };
+        var request = new SessionModelSwitchToRequest { SessionId = _sessionId, ModelId = modelId, ReasoningEffort = reasoningEffort };
         return await CopilotClient.InvokeRpcAsync<SessionModelSwitchToResult>(_rpc, "session.model.switchTo", [request], cancellationToken);
     }
 }

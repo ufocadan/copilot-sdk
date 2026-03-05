@@ -173,6 +173,7 @@ export interface SessionModelSwitchToParams {
    */
   sessionId: string;
   modelId: string;
+  reasoningEffort?: string;
 }
 
 export interface SessionModeGetResult {
