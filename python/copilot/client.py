@@ -1348,11 +1348,14 @@ class CopilotClient:
             if method == "session.event":
                 session_id = params["sessionId"]
                 event_dict = params["event"]
-                # Convert dict to SessionEvent object
-                event = session_event_from_dict(event_dict)
+                # Convert dict to SessionEvent object (skip unknown event types)
+                try:
+                    event = session_event_from_dict(event_dict)
+                except Exception:
+                    event = None
                 with self._sessions_lock:
                     session = self._sessions.get(session_id)
-                if session:
+                if session and event:
                     session._dispatch_event(event)
 
                 # v3 protocol: intercept tool/permission broadcast events
@@ -1442,10 +1445,13 @@ class CopilotClient:
             if method == "session.event":
                 session_id = params["sessionId"]
                 event_dict = params["event"]
-                # Convert dict to SessionEvent object
-                event = session_event_from_dict(event_dict)
+                # Convert dict to SessionEvent object (skip unknown event types)
+                try:
+                    event = session_event_from_dict(event_dict)
+                except Exception:
+                    event = None
                 session = self._sessions.get(session_id)
-                if session:
+                if session and event:
                     session._dispatch_event(event)
 
                 # v3 protocol: intercept tool/permission broadcast events
