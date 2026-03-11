@@ -562,7 +562,7 @@ export class CopilotClient {
         const session = new CopilotSession(sessionId, this.connection!);
         session._setShellProcessCallbacks(
             (processId, session) => this.shellProcessMap.set(processId, session),
-            (processId) => this.shellProcessMap.delete(processId),
+            (processId) => this.shellProcessMap.delete(processId)
         );
         session.registerTools(config.tools);
         session.registerPermissionHandler(config.onPermissionRequest);
@@ -666,7 +666,7 @@ export class CopilotClient {
         const session = new CopilotSession(sessionId, this.connection!);
         session._setShellProcessCallbacks(
             (processId, session) => this.shellProcessMap.set(processId, session),
-            (processId) => this.shellProcessMap.delete(processId),
+            (processId) => this.shellProcessMap.delete(processId)
         );
         session.registerTools(config.tools);
         session.registerPermissionHandler(config.onPermissionRequest);
