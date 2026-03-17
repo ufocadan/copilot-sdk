@@ -1,0 +1,6 @@
+Issue Triage Automation
+
+1. Get the failure identified -> bugs, feature requests, docs
+2. For bugs -> runtime issue? file in the correct place and open PRs
+3. For docs -> identify it is a runtime behavior doc so we can mine runtime for behavior guidance then open PR or open PR on SDK repo directly
+4. For features -> we tag and label, wait for reactions (whatever the threshold might be).
