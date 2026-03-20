@@ -1,6 +1,6 @@
 import asyncio
 import os
-from copilot import CopilotClient, SubprocessConfig
+from copilot import CopilotClient, PermissionHandler, SubprocessConfig
 
 
 async def main():
@@ -11,10 +11,9 @@ async def main():
 
     try:
         session = await client.create_session(
-            {
-                "model": "claude-haiku-4.5",
-                "streaming": True,
-            }
+            on_permission_request=PermissionHandler.approve_all,
+            model="claude-haiku-4.5",
+            streaming=True,
         )
 
         chunk_count = 0
@@ -27,7 +26,7 @@ async def main():
         session.on(on_event)
 
         response = await session.send_and_wait(
-            {"prompt": "What is the capital of France?"}
+            "What is the capital of France?"
         )
 
         if response:

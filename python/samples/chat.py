@@ -9,11 +9,7 @@ RESET = "\033[0m"
 async def main():
     client = CopilotClient()
     await client.start()
-    session = await client.create_session(
-        {
-            "on_permission_request": PermissionHandler.approve_all,
-        }
-    )
+    session = await client.create_session(on_permission_request=PermissionHandler.approve_all)
 
     def on_event(event):
         output = None
@@ -34,7 +30,7 @@ async def main():
             continue
         print()
 
-        reply = await session.send_and_wait({"prompt": user_input})
+        reply = await session.send_and_wait(user_input)
         print(f"\nAssistant: {reply.data.content if reply else None}\n")
 
 

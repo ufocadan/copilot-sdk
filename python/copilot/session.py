@@ -11,8 +11,10 @@ import asyncio
 import inspect
 import threading
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any, Literal, cast
 
+from ._jsonrpc import JsonRpcError, ProcessExitedError
+from ._telemetry import get_trace_context, trace_context
 from .generated.rpc import (
     Kind,
     Level,
@@ -25,11 +27,11 @@ from .generated.rpc import (
     SessionToolsHandlePendingToolCallParams,
 )
 from .generated.session_events import SessionEvent, SessionEventType, session_event_from_dict
-from .jsonrpc import JsonRpcError, ProcessExitedError
 from .types import (
-    MessageOptions,
+    Attachment,
     PermissionRequest,
     PermissionRequestResult,
+    SectionTransformFn,
     SessionHooks,
     ShellExitHandler,
     ShellExitNotification,
@@ -69,7 +71,7 @@ class CopilotSession:
         ...     unsubscribe = session.on(lambda event: print(event.type))
         ...
         ...     # Send a message
-        ...     await session.send({"prompt": "Hello, world!"})
+        ...     await session.send("Hello, world!")
         ...
         ...     # Clean up
         ...     unsubscribe()
@@ -110,6 +112,8 @@ class CopilotSession:
         self._tracked_process_ids_lock = threading.Lock()
         self._register_shell_process: Callable[[str, CopilotSession], None] | None = None
         self._unregister_shell_process_fn: Callable[[str], None] | None = None
+        self._transform_callbacks: dict[str, SectionTransformFn] | None = None
+        self._transform_callbacks_lock = threading.Lock()
         self._rpc: SessionRpc | None = None
 
     @property
@@ -117,6 +121,14 @@ class CopilotSession:
         """Typed session-scoped RPC methods."""
         if self._rpc is None:
             self._rpc = SessionRpc(self._client, self.session_id)
+            original_exec = self._rpc.shell.exec
+
+            async def exec_with_tracking(params, *, timeout=None):
+                result = await original_exec(params, timeout=timeout)
+                self._track_shell_process(result.process_id)
+                return result
+
+            self._rpc.shell.exec = exec_with_tracking
         return self._rpc
 
     @property
@@ -129,44 +141,57 @@ class CopilotSession:
         """
         return self._workspace_path
 
-    async def send(self, options: MessageOptions) -> str:
+    async def send(
+        self,
+        prompt: str,
+        *,
+        attachments: list[Attachment] | None = None,
+        mode: Literal["enqueue", "immediate"] | None = None,
+    ) -> str:
         """
-        Send a message to this session and wait for the response.
+        Send a message to this session.
 
         The message is processed asynchronously. Subscribe to events via :meth:`on`
-        to receive streaming responses and other session events.
+        to receive streaming responses and other session events. Use
+        :meth:`send_and_wait` to block until the assistant finishes processing.
 
         Args:
-            options: Message options including the prompt and optional attachments.
-                Must contain a "prompt" key with the message text. Can optionally
-                include "attachments" and "mode" keys.
+            prompt: The message text to send.
+            attachments: Optional file, directory, or selection attachments.
+            mode: Message delivery mode (``"enqueue"`` or ``"immediate"``).
 
         Returns:
-            The message ID of the response, which can be used to correlate events.
+            The message ID assigned by the server, which can be used to correlate events.
 
         Raises:
             Exception: If the session has been disconnected or the connection fails.
 
         Example:
-            >>> message_id = await session.send({
-            ...     "prompt": "Explain this code",
-            ...     "attachments": [{"type": "file", "path": "./src/main.py"}]
-            ... })
+            >>> message_id = await session.send(
+            ...     "Explain this code",
+            ...     attachments=[{"type": "file", "path": "./src/main.py"}],
+            ... )
         """
         params: dict[str, Any] = {
             "sessionId": self.session_id,
-            "prompt": options["prompt"],
+            "prompt": prompt,
         }
-        if "attachments" in options:
-            params["attachments"] = options["attachments"]
-        if "mode" in options:
-            params["mode"] = options["mode"]
+        if attachments is not None:
+            params["attachments"] = attachments
+        if mode is not None:
+            params["mode"] = mode
+        params.update(get_trace_context())
 
         response = await self._client.request("session.send", params)
         return response["messageId"]
 
     async def send_and_wait(
-        self, options: MessageOptions, timeout: float | None = None
+        self,
+        prompt: str,
+        *,
+        attachments: list[Attachment] | None = None,
+        mode: Literal["enqueue", "immediate"] | None = None,
+        timeout: float = 60.0,
     ) -> SessionEvent | None:
         """
         Send a message to this session and wait until the session becomes idle.
@@ -178,7 +203,9 @@ class CopilotSession:
         Events are still delivered to handlers registered via :meth:`on` while waiting.
 
         Args:
-            options: Message options including the prompt and optional attachments.
+            prompt: The message text to send.
+            attachments: Optional file, directory, or selection attachments.
+            mode: Message delivery mode (``"enqueue"`` or ``"immediate"``).
             timeout: Timeout in seconds (default: 60). Controls how long to wait;
                 does not abort in-flight agent work.
 
@@ -190,12 +217,10 @@ class CopilotSession:
             Exception: If the session has been disconnected or the connection fails.
 
         Example:
-            >>> response = await session.send_and_wait({"prompt": "What is 2+2?"})
+            >>> response = await session.send_and_wait("What is 2+2?")
             >>> if response:
             ...     print(response.data.content)
         """
-        effective_timeout = timeout if timeout is not None else 60.0
-
         idle_event = asyncio.Event()
         error_event: Exception | None = None
         last_assistant_message: SessionEvent | None = None
@@ -214,13 +239,13 @@ class CopilotSession:
 
         unsubscribe = self.on(handler)
         try:
-            await self.send(options)
-            await asyncio.wait_for(idle_event.wait(), timeout=effective_timeout)
+            await self.send(prompt, attachments=attachments, mode=mode)
+            await asyncio.wait_for(idle_event.wait(), timeout=timeout)
             if error_event:
                 raise error_event
             return last_assistant_message
         except TimeoutError:
-            raise TimeoutError(f"Timeout after {effective_timeout}s waiting for session.idle")
+            raise TimeoutError(f"Timeout after {timeout}s waiting for session.idle")
         finally:
             unsubscribe()
 
@@ -245,9 +270,7 @@ class CopilotSession:
             ...         print(f"Assistant: {event.data.content}")
             ...     elif event.type == "session.error":
             ...         print(f"Error: {event.data.message}")
-            ...
             >>> unsubscribe = session.on(handle_event)
-            ...
             >>> # Later, to stop receiving events:
             >>> unsubscribe()
         """
@@ -404,9 +427,11 @@ class CopilotSession:
 
             tool_call_id = event.data.tool_call_id or ""
             arguments = event.data.arguments
+            tp = getattr(event.data, "traceparent", None)
+            ts = getattr(event.data, "tracestate", None)
             asyncio.ensure_future(
                 self._execute_tool_and_respond(
-                    request_id, tool_name, tool_call_id, arguments, handler
+                    request_id, tool_name, tool_call_id, arguments, handler, tp, ts
                 )
             )
 
@@ -432,6 +457,8 @@ class CopilotSession:
         tool_call_id: str,
         arguments: Any,
         handler: ToolHandler,
+        traceparent: str | None = None,
+        tracestate: str | None = None,
     ) -> None:
         """Execute a tool handler and send the result back via HandlePendingToolCall RPC."""
         try:
@@ -442,9 +469,10 @@ class CopilotSession:
                 arguments=arguments,
             )
 
-            result = handler(invocation)
-            if inspect.isawaitable(result):
-                result = await result
+            with trace_context(traceparent, tracestate):
+                result = handler(invocation)
+                if inspect.isawaitable(result):
+                    result = await result
 
             tool_result: ToolResult
             if result is None:
@@ -731,6 +759,62 @@ class CopilotSession:
             # Hook failed, return None
             return None
 
+    def _register_transform_callbacks(
+        self, callbacks: dict[str, SectionTransformFn] | None
+    ) -> None:
+        """
+        Register transform callbacks for system message sections.
+
+        Transform callbacks allow modifying individual sections of the system
+        prompt at runtime. Each callback receives the current section content
+        and returns the transformed content.
+
+        Note:
+            This method is internal. Transform callbacks are typically registered
+            when creating a session via :meth:`CopilotClient.create_session`.
+
+        Args:
+            callbacks: A dict mapping section IDs to transform functions,
+                or None to remove all callbacks.
+        """
+        with self._transform_callbacks_lock:
+            self._transform_callbacks = callbacks
+
+    async def _handle_system_message_transform(
+        self, sections: dict[str, dict[str, str]]
+    ) -> dict[str, dict[str, dict[str, str]]]:
+        """
+        Handle a systemMessage.transform request from the runtime.
+
+        Note:
+            This method is internal and should not be called directly.
+
+        Args:
+            sections: A dict mapping section IDs to section data dicts
+                containing a ``"content"`` key.
+
+        Returns:
+            A dict with a ``"sections"`` key containing the transformed section data.
+        """
+        with self._transform_callbacks_lock:
+            callbacks = self._transform_callbacks
+
+        result: dict[str, dict[str, str]] = {}
+        for section_id, section_data in sections.items():
+            content = section_data.get("content", "")
+            callback = callbacks.get(section_id) if callbacks else None
+            if callback:
+                try:
+                    transformed = callback(content)
+                    if inspect.isawaitable(transformed):
+                        transformed = await transformed
+                    result[section_id] = {"content": str(transformed)}
+                except Exception:  # pylint: disable=broad-except
+                    result[section_id] = {"content": content}
+            else:
+                result[section_id] = {"content": content}
+        return {"sections": result}
+
     async def get_messages(self) -> list[SessionEvent]:
         """
         Retrieve all events and messages from this session's history.
@@ -834,9 +918,7 @@ class CopilotSession:
             >>> import asyncio
             >>>
             >>> # Start a long-running request
-            >>> task = asyncio.create_task(
-            ...     session.send({"prompt": "Write a very long story..."})
-            ... )
+            >>> task = asyncio.create_task(session.send("Write a very long story..."))
             >>>
             >>> # Abort after 5 seconds
             >>> await asyncio.sleep(5)
@@ -844,7 +926,7 @@ class CopilotSession:
         """
         await self._client.request("session.abort", {"sessionId": self.session_id})
 
-    async def set_model(self, model: str) -> None:
+    async def set_model(self, model: str, *, reasoning_effort: str | None = None) -> None:
         """
         Change the model for this session.
 
@@ -853,14 +935,22 @@ class CopilotSession:
 
         Args:
             model: Model ID to switch to (e.g., "gpt-4.1", "claude-sonnet-4").
+            reasoning_effort: Optional reasoning effort level for the new model
+                (e.g., "low", "medium", "high", "xhigh").
 
         Raises:
             Exception: If the session has been destroyed or the connection fails.
 
         Example:
             >>> await session.set_model("gpt-4.1")
+            >>> await session.set_model("claude-sonnet-4.6", reasoning_effort="high")
         """
-        await self.rpc.model.switch_to(SessionModelSwitchToParams(model_id=model))
+        await self.rpc.model.switch_to(
+            SessionModelSwitchToParams(
+                model_id=model,
+                reasoning_effort=reasoning_effort,
+            )
+        )
 
     async def log(
         self,

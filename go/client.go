@@ -446,12 +446,12 @@ func (c *Client) ForceStop() {
 	c.RPC = nil
 }
 
-func (c *Client) ensureConnected() error {
+func (c *Client) ensureConnected(ctx context.Context) error {
 	if c.client != nil {
 		return nil
 	}
 	if c.autoStart {
-		return c.Start(context.Background())
+		return c.Start(ctx)
 	}
 	return fmt.Errorf("client not connected. Call Start() first")
 }
@@ -485,12 +485,43 @@ func (c *Client) ensureConnected() error {
 //	        },
 //	    },
 //	})
+//
+// extractTransformCallbacks separates transform callbacks from a SystemMessageConfig,
+// returning a wire-safe config and a map of callbacks (nil if none).
+func extractTransformCallbacks(config *SystemMessageConfig) (*SystemMessageConfig, map[string]SectionTransformFn) {
+	if config == nil || config.Mode != "customize" || len(config.Sections) == 0 {
+		return config, nil
+	}
+
+	callbacks := make(map[string]SectionTransformFn)
+	wireSections := make(map[string]SectionOverride)
+	for id, override := range config.Sections {
+		if override.Transform != nil {
+			callbacks[id] = override.Transform
+			wireSections[id] = SectionOverride{Action: "transform"}
+		} else {
+			wireSections[id] = override
+		}
+	}
+
+	if len(callbacks) == 0 {
+		return config, nil
+	}
+
+	wireConfig := &SystemMessageConfig{
+		Mode:     config.Mode,
+		Content:  config.Content,
+		Sections: wireSections,
+	}
+	return wireConfig, callbacks
+}
+
 func (c *Client) CreateSession(ctx context.Context, config *SessionConfig) (*Session, error) {
 	if config == nil || config.OnPermissionRequest == nil {
 		return nil, fmt.Errorf("an OnPermissionRequest handler is required when creating a session. For example, to allow all permissions, use &copilot.SessionConfig{OnPermissionRequest: copilot.PermissionHandler.ApproveAll}")
 	}
 
-	if err := c.ensureConnected(); err != nil {
+	if err := c.ensureConnected(ctx); err != nil {
 		return nil, err
 	}
 
@@ -500,7 +531,8 @@ func (c *Client) CreateSession(ctx context.Context, config *SessionConfig) (*Ses
 	req.ReasoningEffort = config.ReasoningEffort
 	req.ConfigDir = config.ConfigDir
 	req.Tools = config.Tools
-	req.SystemMessage = config.SystemMessage
+	wireSystemMessage, transformCallbacks := extractTransformCallbacks(config.SystemMessage)
+	req.SystemMessage = wireSystemMessage
 	req.AvailableTools = config.AvailableTools
 	req.ExcludedTools = config.ExcludedTools
 	req.Provider = config.Provider
@@ -529,6 +561,10 @@ func (c *Client) CreateSession(ctx context.Context, config *SessionConfig) (*Ses
 	}
 	req.RequestPermission = Bool(true)
 
+	traceparent, tracestate := getTraceContext(ctx)
+	req.Traceparent = traceparent
+	req.Tracestate = tracestate
+
 	sessionID := config.SessionID
 	if sessionID == "" {
 		sessionID = uuid.New().String()
@@ -547,6 +583,9 @@ func (c *Client) CreateSession(ctx context.Context, config *SessionConfig) (*Ses
 	}
 	if config.Hooks != nil {
 		session.registerHooks(config.Hooks)
+	}
+	if transformCallbacks != nil {
+		session.registerTransformCallbacks(transformCallbacks)
 	}
 	if config.OnEvent != nil {
 		session.On(config.OnEvent)
@@ -607,7 +646,7 @@ func (c *Client) ResumeSessionWithOptions(ctx context.Context, sessionID string,
 		return nil, fmt.Errorf("an OnPermissionRequest handler is required when resuming a session. For example, to allow all permissions, use &copilot.ResumeSessionConfig{OnPermissionRequest: copilot.PermissionHandler.ApproveAll}")
 	}
 
-	if err := c.ensureConnected(); err != nil {
+	if err := c.ensureConnected(ctx); err != nil {
 		return nil, err
 	}
 
@@ -616,7 +655,8 @@ func (c *Client) ResumeSessionWithOptions(ctx context.Context, sessionID string,
 	req.ClientName = config.ClientName
 	req.Model = config.Model
 	req.ReasoningEffort = config.ReasoningEffort
-	req.SystemMessage = config.SystemMessage
+	wireSystemMessage, transformCallbacks := extractTransformCallbacks(config.SystemMessage)
+	req.SystemMessage = wireSystemMessage
 	req.Tools = config.Tools
 	req.Provider = config.Provider
 	req.AvailableTools = config.AvailableTools
@@ -649,6 +689,10 @@ func (c *Client) ResumeSessionWithOptions(ctx context.Context, sessionID string,
 	req.InfiniteSessions = config.InfiniteSessions
 	req.RequestPermission = Bool(true)
 
+	traceparent, tracestate := getTraceContext(ctx)
+	req.Traceparent = traceparent
+	req.Tracestate = tracestate
+
 	// Create and register the session before issuing the RPC so that
 	// events emitted by the CLI (e.g. session.start) are not dropped.
 	session := newSession(sessionID, c.client, "")
@@ -661,6 +705,9 @@ func (c *Client) ResumeSessionWithOptions(ctx context.Context, sessionID string,
 	}
 	if config.Hooks != nil {
 		session.registerHooks(config.Hooks)
+	}
+	if transformCallbacks != nil {
+		session.registerTransformCallbacks(transformCallbacks)
 	}
 	if config.OnEvent != nil {
 		session.On(config.OnEvent)
@@ -712,7 +759,7 @@ func (c *Client) ResumeSessionWithOptions(ctx context.Context, sessionID string,
 //
 //	sessions, err := client.ListSessions(context.Background(), &SessionListFilter{Repository: "owner/repo"})
 func (c *Client) ListSessions(ctx context.Context, filter *SessionListFilter) ([]SessionMetadata, error) {
-	if err := c.ensureConnected(); err != nil {
+	if err := c.ensureConnected(ctx); err != nil {
 		return nil, err
 	}
 
@@ -747,7 +794,7 @@ func (c *Client) ListSessions(ctx context.Context, filter *SessionListFilter) ([
 //	    log.Fatal(err)
 //	}
 func (c *Client) DeleteSession(ctx context.Context, sessionID string) error {
-	if err := c.ensureConnected(); err != nil {
+	if err := c.ensureConnected(ctx); err != nil {
 		return err
 	}
 
@@ -794,7 +841,7 @@ func (c *Client) DeleteSession(ctx context.Context, sessionID string) error {
 //	    })
 //	}
 func (c *Client) GetLastSessionID(ctx context.Context) (*string, error) {
-	if err := c.ensureConnected(); err != nil {
+	if err := c.ensureConnected(ctx); err != nil {
 		return nil, err
 	}
 
@@ -826,14 +873,8 @@ func (c *Client) GetLastSessionID(ctx context.Context) (*string, error) {
 //	    fmt.Printf("TUI is displaying session: %s\n", *sessionID)
 //	}
 func (c *Client) GetForegroundSessionID(ctx context.Context) (*string, error) {
-	if c.client == nil {
-		if c.autoStart {
-			if err := c.Start(ctx); err != nil {
-				return nil, err
-			}
-		} else {
-			return nil, fmt.Errorf("client not connected. Call Start() first")
-		}
+	if err := c.ensureConnected(ctx); err != nil {
+		return nil, err
 	}
 
 	result, err := c.client.Request("session.getForeground", getForegroundSessionRequest{})
@@ -860,14 +901,8 @@ func (c *Client) GetForegroundSessionID(ctx context.Context) (*string, error) {
 //	    log.Fatal(err)
 //	}
 func (c *Client) SetForegroundSessionID(ctx context.Context, sessionID string) error {
-	if c.client == nil {
-		if c.autoStart {
-			if err := c.Start(ctx); err != nil {
-				return err
-			}
-		} else {
-			return fmt.Errorf("client not connected. Call Start() first")
-		}
+	if err := c.ensureConnected(ctx); err != nil {
+		return err
 	}
 
 	result, err := c.client.Request("session.setForeground", setForegroundSessionRequest{SessionID: sessionID})
@@ -1197,7 +1232,7 @@ func (c *Client) startCLIServer(ctx context.Context) error {
 		args = append([]string{cliPath}, args...)
 	}
 
-	c.process = exec.CommandContext(ctx, command, args...)
+	c.process = exec.Command(command, args...)
 
 	// Configure platform-specific process attributes (e.g., hide window on Windows)
 	configureProcAttr(c.process)
@@ -1211,6 +1246,30 @@ func (c *Client) startCLIServer(ctx context.Context) error {
 	c.process.Env = c.options.Env
 	if c.options.GitHubToken != "" {
 		c.process.Env = append(c.process.Env, "COPILOT_SDK_AUTH_TOKEN="+c.options.GitHubToken)
+	}
+
+	if c.options.Telemetry != nil {
+		t := c.options.Telemetry
+		c.process.Env = append(c.process.Env, "COPILOT_OTEL_ENABLED=true")
+		if t.OTLPEndpoint != "" {
+			c.process.Env = append(c.process.Env, "OTEL_EXPORTER_OTLP_ENDPOINT="+t.OTLPEndpoint)
+		}
+		if t.FilePath != "" {
+			c.process.Env = append(c.process.Env, "COPILOT_OTEL_FILE_EXPORTER_PATH="+t.FilePath)
+		}
+		if t.ExporterType != "" {
+			c.process.Env = append(c.process.Env, "COPILOT_OTEL_EXPORTER_TYPE="+t.ExporterType)
+		}
+		if t.SourceName != "" {
+			c.process.Env = append(c.process.Env, "COPILOT_OTEL_SOURCE_NAME="+t.SourceName)
+		}
+		if t.CaptureContent != nil {
+			val := "false"
+			if *t.CaptureContent {
+				val = "true"
+			}
+			c.process.Env = append(c.process.Env, "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT="+val)
+		}
 	}
 
 	if c.useStdio {
@@ -1262,14 +1321,16 @@ func (c *Client) startCLIServer(ctx context.Context) error {
 		c.monitorProcess()
 
 		scanner := bufio.NewScanner(stdout)
-		timeout := time.After(10 * time.Second)
 		portRegex := regexp.MustCompile(`listening on port (\d+)`)
+
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
 
 		for {
 			select {
-			case <-timeout:
+			case <-ctx.Done():
 				killErr := c.killProcess()
-				return errors.Join(errors.New("timeout waiting for CLI server to start"), killErr)
+				return errors.Join(fmt.Errorf("failed waiting for CLI server to start: %w", ctx.Err()), killErr)
 			case <-c.processDone:
 				killErr := c.killProcess()
 				return errors.Join(errors.New("CLI server process exited before reporting port"), killErr)
@@ -1341,12 +1402,13 @@ func (c *Client) connectViaTcp(ctx context.Context) error {
 		return fmt.Errorf("server port not available")
 	}
 
-	// Create TCP connection that cancels on context done or after 10 seconds
+	// Merge a 10-second timeout with the caller's context so whichever
+	// deadline comes first wins.
 	address := net.JoinHostPort(c.actualHost, fmt.Sprintf("%d", c.actualPort))
-	dialer := net.Dialer{
-		Timeout: 10 * time.Second,
-	}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(dialCtx, "tcp", address)
 	if err != nil {
 		return fmt.Errorf("failed to connect to CLI server at %s: %w", address, err)
 	}
@@ -1386,6 +1448,7 @@ func (c *Client) setupNotificationHandler() {
 	c.client.SetRequestHandler("hooks.invoke", jsonrpc2.RequestHandlerFor(c.handleHooksInvoke))
 	c.client.SetRequestHandler("shell.output", jsonrpc2.NotificationHandlerFor(c.handleShellOutput))
 	c.client.SetRequestHandler("shell.exit", jsonrpc2.NotificationHandlerFor(c.handleShellExit))
+	c.client.SetRequestHandler("systemMessage.transform", jsonrpc2.RequestHandlerFor(c.handleSystemMessageTransform))
 }
 
 func (c *Client) handleSessionEvent(req sessionEventRequest) {
@@ -1403,9 +1466,7 @@ func (c *Client) handleSessionEvent(req sessionEventRequest) {
 }
 
 func (c *Client) handleShellOutput(notification ShellOutputNotification) {
-	c.shellProcessMapMux.Lock()
-	session, ok := c.shellProcessMap[notification.ProcessID]
-	c.shellProcessMapMux.Unlock()
+	session, ok := c.getShellNotificationSession(notification.SessionID, notification.ProcessID)
 
 	if ok {
 		session.dispatchShellOutput(notification)
@@ -1413,18 +1474,37 @@ func (c *Client) handleShellOutput(notification ShellOutputNotification) {
 }
 
 func (c *Client) handleShellExit(notification ShellExitNotification) {
-	c.shellProcessMapMux.Lock()
-	session, ok := c.shellProcessMap[notification.ProcessID]
-	c.shellProcessMapMux.Unlock()
+	session, ok := c.getShellNotificationSession(notification.SessionID, notification.ProcessID)
 
 	if ok {
 		session.dispatchShellExit(notification)
-		// Clean up the mapping after exit
-		c.shellProcessMapMux.Lock()
-		delete(c.shellProcessMap, notification.ProcessID)
-		c.shellProcessMapMux.Unlock()
-		session.untrackShellProcess(notification.ProcessID)
+		if notification.ProcessID != "" {
+			c.shellProcessMapMux.Lock()
+			delete(c.shellProcessMap, notification.ProcessID)
+			c.shellProcessMapMux.Unlock()
+			session.untrackShellProcess(notification.ProcessID)
+		}
 	}
+}
+
+func (c *Client) getShellNotificationSession(sessionID, processID string) (*Session, bool) {
+	if sessionID != "" {
+		c.sessionsMux.Lock()
+		session, ok := c.sessions[sessionID]
+		c.sessionsMux.Unlock()
+		if ok {
+			return session, true
+		}
+	}
+
+	if processID != "" {
+		c.shellProcessMapMux.Lock()
+		session, ok := c.shellProcessMap[processID]
+		c.shellProcessMapMux.Unlock()
+		return session, ok
+	}
+
+	return nil, false
 }
 
 func (c *Client) registerShellProcess(processID string, session *Session) {
@@ -1489,16 +1569,38 @@ func (c *Client) handleHooksInvoke(req hooksInvokeRequest) (map[string]any, *jso
 	return result, nil
 }
 
+// handleSystemMessageTransform handles a system message transform request from the CLI server.
+func (c *Client) handleSystemMessageTransform(req systemMessageTransformRequest) (systemMessageTransformResponse, *jsonrpc2.Error) {
+	if req.SessionID == "" {
+		return systemMessageTransformResponse{}, &jsonrpc2.Error{Code: -32602, Message: "invalid system message transform payload"}
+	}
+
+	c.sessionsMux.Lock()
+	session, ok := c.sessions[req.SessionID]
+	c.sessionsMux.Unlock()
+	if !ok {
+		return systemMessageTransformResponse{}, &jsonrpc2.Error{Code: -32602, Message: fmt.Sprintf("unknown session %s", req.SessionID)}
+	}
+
+	resp, err := session.handleSystemMessageTransform(req.Sections)
+	if err != nil {
+		return systemMessageTransformResponse{}, &jsonrpc2.Error{Code: -32603, Message: err.Error()}
+	}
+	return resp, nil
+}
+
 // ========================================================================
 // Protocol v2 backward-compatibility adapters
 // ========================================================================
 
 // toolCallRequestV2 is the v2 RPC request payload for tool.call.
 type toolCallRequestV2 struct {
-	SessionID  string `json:"sessionId"`
-	ToolCallID string `json:"toolCallId"`
-	ToolName   string `json:"toolName"`
-	Arguments  any    `json:"arguments"`
+	SessionID   string `json:"sessionId"`
+	ToolCallID  string `json:"toolCallId"`
+	ToolName    string `json:"toolName"`
+	Arguments   any    `json:"arguments"`
+	Traceparent string `json:"traceparent,omitempty"`
+	Tracestate  string `json:"tracestate,omitempty"`
 }
 
 // toolCallResponseV2 is the v2 RPC response payload for tool.call.
@@ -1540,7 +1642,15 @@ func (c *Client) handleToolCallRequestV2(req toolCallRequestV2) (*toolCallRespon
 		}}, nil
 	}
 
-	invocation := ToolInvocation(req)
+	ctx := contextWithTraceParent(context.Background(), req.Traceparent, req.Tracestate)
+
+	invocation := ToolInvocation{
+		SessionID:    req.SessionID,
+		ToolCallID:   req.ToolCallID,
+		ToolName:     req.ToolName,
+		Arguments:    req.Arguments,
+		TraceContext: ctx,
+	}
 
 	result, err := handler(invocation)
 	if err != nil {

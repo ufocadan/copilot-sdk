@@ -13,6 +13,41 @@ export type SessionEvent = GeneratedSessionEvent;
 /**
  * Options for creating a CopilotClient
  */
+/**
+ * W3C Trace Context headers used for distributed trace propagation.
+ */
+export interface TraceContext {
+    traceparent?: string;
+    tracestate?: string;
+}
+
+/**
+ * Callback that returns the current W3C Trace Context.
+ * Wire this up to your OpenTelemetry (or other tracing) SDK to enable
+ * distributed trace propagation between your app and the Copilot CLI.
+ */
+export type TraceContextProvider = () => TraceContext | Promise<TraceContext>;
+
+/**
+ * Configuration for OpenTelemetry instrumentation.
+ *
+ * When provided via {@link CopilotClientOptions.telemetry}, the SDK sets
+ * the corresponding environment variables on the spawned CLI process so
+ * that the CLI's built-in OTel exporter is configured automatically.
+ */
+export interface TelemetryConfig {
+    /** OTLP HTTP endpoint URL for trace/metric export. Sets OTEL_EXPORTER_OTLP_ENDPOINT. */
+    otlpEndpoint?: string;
+    /** File path for JSON-lines trace output. Sets COPILOT_OTEL_FILE_EXPORTER_PATH. */
+    filePath?: string;
+    /** Exporter backend type: "otlp-http" or "file". Sets COPILOT_OTEL_EXPORTER_TYPE. */
+    exporterType?: string;
+    /** Instrumentation scope name. Sets COPILOT_OTEL_SOURCE_NAME. */
+    sourceName?: string;
+    /** Whether to capture message content (prompts, responses). Sets OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT. */
+    captureContent?: boolean;
+}
+
 export interface CopilotClientOptions {
     /**
      * Path to the CLI executable or JavaScript entry point.
@@ -103,6 +138,39 @@ export interface CopilotClientOptions {
      * available from your custom provider.
      */
     onListModels?: () => Promise<ModelInfo[]> | ModelInfo[];
+
+    /**
+     * OpenTelemetry configuration for the CLI process.
+     * When provided, the corresponding OTel environment variables are set
+     * on the spawned CLI server.
+     */
+    telemetry?: TelemetryConfig;
+
+    /**
+     * Advanced: callback that returns the current W3C Trace Context for distributed
+     * trace propagation.  Most users do not need this — the {@link telemetry} config
+     * alone is sufficient to collect traces from the CLI.
+     *
+     * This callback is only useful when your application creates its own
+     * OpenTelemetry spans and you want them to appear in the **same** distributed
+     * trace as the CLI's spans.  The SDK calls this before `session.create`,
+     * `session.resume`, and `session.send` RPCs to inject `traceparent`/`tracestate`
+     * into the request.
+     *
+     * @example
+     * ```typescript
+     * import { propagation, context } from "@opentelemetry/api";
+     *
+     * const client = new CopilotClient({
+     *   onGetTraceContext: () => {
+     *     const carrier: Record<string, string> = {};
+     *     propagation.inject(context.active(), carrier);
+     *     return carrier;
+     *   },
+     * });
+     * ```
+     */
+    onGetTraceContext?: TraceContextProvider;
 }
 
 /**
@@ -133,6 +201,10 @@ export interface ToolInvocation {
     toolCallId: string;
     toolName: string;
     arguments: unknown;
+    /** W3C Trace Context traceparent from the CLI's execute_tool span. */
+    traceparent?: string;
+    /** W3C Trace Context tracestate from the CLI's execute_tool span. */
+    tracestate?: string;
 }
 
 export type ToolHandler<TArgs = unknown> = (
@@ -201,6 +273,79 @@ export interface ToolCallResponsePayload {
 }
 
 /**
+ * Known system prompt section identifiers for the "customize" mode.
+ * Each section corresponds to a distinct part of the system prompt.
+ */
+export type SystemPromptSection =
+    | "identity"
+    | "tone"
+    | "tool_efficiency"
+    | "environment_context"
+    | "code_change_rules"
+    | "guidelines"
+    | "safety"
+    | "tool_instructions"
+    | "custom_instructions"
+    | "last_instructions";
+
+/** Section metadata for documentation and tooling. */
+export const SYSTEM_PROMPT_SECTIONS: Record<SystemPromptSection, { description: string }> = {
+    identity: { description: "Agent identity preamble and mode statement" },
+    tone: { description: "Response style, conciseness rules, output formatting preferences" },
+    tool_efficiency: { description: "Tool usage patterns, parallel calling, batching guidelines" },
+    environment_context: { description: "CWD, OS, git root, directory listing, available tools" },
+    code_change_rules: { description: "Coding rules, linting/testing, ecosystem tools, style" },
+    guidelines: { description: "Tips, behavioral best practices, behavioral guidelines" },
+    safety: { description: "Environment limitations, prohibited actions, security policies" },
+    tool_instructions: { description: "Per-tool usage instructions" },
+    custom_instructions: { description: "Repository and organization custom instructions" },
+    last_instructions: {
+        description:
+            "End-of-prompt instructions: parallel tool calling, persistence, task completion",
+    },
+};
+
+/**
+ * Transform callback for a single section: receives current content, returns new content.
+ */
+export type SectionTransformFn = (currentContent: string) => string | Promise<string>;
+
+/**
+ * Override action: a string literal for static overrides, or a callback for transforms.
+ *
+ * - `"replace"`: Replace section content entirely
+ * - `"remove"`: Remove the section
+ * - `"append"`: Append to existing section content
+ * - `"prepend"`: Prepend to existing section content
+ * - `function`: Transform callback — receives current section content, returns new content
+ */
+export type SectionOverrideAction =
+    | "replace"
+    | "remove"
+    | "append"
+    | "prepend"
+    | SectionTransformFn;
+
+/**
+ * Override operation for a single system prompt section.
+ */
+export interface SectionOverride {
+    /**
+     * The operation to perform on this section.
+     * Can be a string action or a transform callback function.
+     */
+    action: SectionOverrideAction;
+
+    /**
+     * Content for the override. Optional for all actions.
+     * - For replace, omitting content replaces with an empty string.
+     * - For append/prepend, content is added before/after the existing section.
+     * - Ignored for the remove action.
+     */
+    content?: string;
+}
+
+/**
  * Append mode: Use CLI foundation with optional appended content (default).
  */
 export interface SystemMessageAppendConfig {
@@ -227,11 +372,36 @@ export interface SystemMessageReplaceConfig {
 }
 
 /**
+ * Customize mode: Override individual sections of the system prompt.
+ * Keeps the SDK-managed prompt structure while allowing targeted modifications.
+ */
+export interface SystemMessageCustomizeConfig {
+    mode: "customize";
+
+    /**
+     * Override specific sections of the system prompt by section ID.
+     * Unknown section IDs gracefully fall back: content-bearing overrides are appended
+     * to additional instructions, and "remove" on unknown sections is a silent no-op.
+     */
+    sections?: Partial<Record<SystemPromptSection, SectionOverride>>;
+
+    /**
+     * Additional content appended after all sections.
+     * Equivalent to append mode's content field — provided for convenience.
+     */
+    content?: string;
+}
+
+/**
  * System message configuration for session creation.
  * - Append mode (default): SDK foundation + optional custom content
  * - Replace mode: Full control, caller provides entire system message
+ * - Customize mode: Section-level overrides with graceful fallback
  */
-export type SystemMessageConfig = SystemMessageAppendConfig | SystemMessageReplaceConfig;
+export type SystemMessageConfig =
+    | SystemMessageAppendConfig
+    | SystemMessageReplaceConfig
+    | SystemMessageCustomizeConfig;
 
 /**
  * Permission request types from the server
@@ -861,7 +1031,7 @@ export interface MessageOptions {
     prompt: string;
 
     /**
-     * File, directory, or selection attachments
+     * File, directory, selection, or blob attachments
      */
     attachments?: Array<
         | {
@@ -883,6 +1053,12 @@ export interface MessageOptions {
                   end: { line: number; character: number };
               };
               text?: string;
+          }
+        | {
+              type: "blob";
+              data: string;
+              mimeType: string;
+              displayName?: string;
           }
     >;
 

@@ -65,6 +65,8 @@ public sealed partial class CopilotSession : IAsyncDisposable
 
     private SessionHooks? _hooks;
     private readonly SemaphoreSlim _hooksLock = new(1, 1);
+    private Dictionary<string, Func<string, Task<string>>>? _transformCallbacks;
+    private readonly SemaphoreSlim _transformCallbacksLock = new(1, 1);
     private SessionRpc? _sessionRpc;
     private int _isDisposed;
     private event Action<ShellOutputNotification>? ShellOutputHandlers;
@@ -158,12 +160,16 @@ public sealed partial class CopilotSession : IAsyncDisposable
     /// </example>
     public async Task<string> SendAsync(MessageOptions options, CancellationToken cancellationToken = default)
     {
+        var (traceparent, tracestate) = TelemetryHelpers.GetTraceContext();
+
         var request = new SendMessageRequest
         {
             SessionId = SessionId,
             Prompt = options.Prompt,
             Attachments = options.Attachments,
-            Mode = options.Mode
+            Mode = options.Mode,
+            Traceparent = traceparent,
+            Tracestate = tracestate
         };
 
         var response = await InvokeRpcAsync<SendMessageResponse>(
@@ -515,7 +521,8 @@ public sealed partial class CopilotSession : IAsyncDisposable
                         if (tool is null)
                             return; // This client doesn't handle this tool; another client will.
 
-                        await ExecuteToolAndRespondAsync(data.RequestId, data.ToolName, data.ToolCallId, data.Arguments, tool);
+                        using (TelemetryHelpers.RestoreTraceContext(data.Traceparent, data.Tracestate))
+                            await ExecuteToolAndRespondAsync(data.RequestId, data.ToolName, data.ToolCallId, data.Arguments, tool);
                         break;
                     }
 
@@ -752,6 +759,72 @@ public sealed partial class CopilotSession : IAsyncDisposable
     }
 
     /// <summary>
+    /// Registers transform callbacks for system message sections.
+    /// </summary>
+    /// <param name="callbacks">The transform callbacks keyed by section identifier.</param>
+    internal void RegisterTransformCallbacks(Dictionary<string, Func<string, Task<string>>>? callbacks)
+    {
+        _transformCallbacksLock.Wait();
+        try
+        {
+            _transformCallbacks = callbacks;
+        }
+        finally
+        {
+            _transformCallbacksLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Handles a systemMessage.transform RPC call from the Copilot CLI.
+    /// </summary>
+    /// <param name="sections">The raw JSON element containing sections to transform.</param>
+    /// <returns>A task that resolves with the transformed sections.</returns>
+    internal async Task<SystemMessageTransformRpcResponse> HandleSystemMessageTransformAsync(JsonElement sections)
+    {
+        Dictionary<string, Func<string, Task<string>>>? callbacks;
+        await _transformCallbacksLock.WaitAsync();
+        try
+        {
+            callbacks = _transformCallbacks;
+        }
+        finally
+        {
+            _transformCallbacksLock.Release();
+        }
+
+        var parsed = JsonSerializer.Deserialize(
+            sections.GetRawText(),
+            SessionJsonContext.Default.DictionaryStringSystemMessageTransformSection) ?? new();
+
+        var result = new Dictionary<string, SystemMessageTransformSection>();
+        foreach (var (sectionId, data) in parsed)
+        {
+            Func<string, Task<string>>? callback = null;
+            callbacks?.TryGetValue(sectionId, out callback);
+
+            if (callback != null)
+            {
+                try
+                {
+                    var transformed = await callback(data.Content ?? "");
+                    result[sectionId] = new SystemMessageTransformSection { Content = transformed };
+                }
+                catch
+                {
+                    result[sectionId] = new SystemMessageTransformSection { Content = data.Content ?? "" };
+                }
+            }
+            else
+            {
+                result[sectionId] = new SystemMessageTransformSection { Content = data.Content ?? "" };
+            }
+        }
+
+        return new SystemMessageTransformRpcResponse { Sections = result };
+    }
+
+    /// <summary>
     /// Gets the complete list of messages and events in the session.
     /// </summary>
     /// <param name="cancellationToken">A <see cref="CancellationToken"/> that can be used to cancel the operation.</param>
@@ -818,15 +891,25 @@ public sealed partial class CopilotSession : IAsyncDisposable
     /// The new model takes effect for the next message. Conversation history is preserved.
     /// </summary>
     /// <param name="model">Model ID to switch to (e.g., "gpt-4.1").</param>
+    /// <param name="reasoningEffort">Reasoning effort level (e.g., "low", "medium", "high", "xhigh").</param>
     /// <param name="cancellationToken">Optional cancellation token.</param>
     /// <example>
     /// <code>
     /// await session.SetModelAsync("gpt-4.1");
+    /// await session.SetModelAsync("claude-sonnet-4.6", "high");
     /// </code>
     /// </example>
-    public async Task SetModelAsync(string model, CancellationToken cancellationToken = default)
+    public async Task SetModelAsync(string model, string? reasoningEffort, CancellationToken cancellationToken = default)
     {
-        await Rpc.Model.SwitchToAsync(model, cancellationToken: cancellationToken);
+        await Rpc.Model.SwitchToAsync(model, reasoningEffort, cancellationToken);
+    }
+
+    /// <summary>
+    /// Changes the model for this session.
+    /// </summary>
+    public Task SetModelAsync(string model, CancellationToken cancellationToken = default)
+    {
+        return SetModelAsync(model, reasoningEffort: null, cancellationToken);
     }
 
     /// <summary>
@@ -837,6 +920,7 @@ public sealed partial class CopilotSession : IAsyncDisposable
     /// <param name="message">The message to log.</param>
     /// <param name="level">Log level (default: info).</param>
     /// <param name="ephemeral">When <c>true</c>, the message is not persisted to disk.</param>
+    /// <param name="url">Optional URL to associate with the log entry.</param>
     /// <param name="cancellationToken">Optional cancellation token.</param>
     /// <example>
     /// <code>
@@ -846,9 +930,9 @@ public sealed partial class CopilotSession : IAsyncDisposable
     /// await session.LogAsync("Temporary status", ephemeral: true);
     /// </code>
     /// </example>
-    public async Task LogAsync(string message, SessionLogRequestLevel? level = null, bool? ephemeral = null, CancellationToken cancellationToken = default)
+    public async Task LogAsync(string message, SessionLogRequestLevel? level = null, bool? ephemeral = null, string? url = null, CancellationToken cancellationToken = default)
     {
-        await Rpc.LogAsync(message, level, ephemeral, cancellationToken);
+        await Rpc.LogAsync(message, level, ephemeral, url, cancellationToken);
     }
 
     /// <summary>
@@ -937,6 +1021,8 @@ public sealed partial class CopilotSession : IAsyncDisposable
         public string Prompt { get; init; } = string.Empty;
         public List<UserMessageDataAttachmentsItem>? Attachments { get; init; }
         public string? Mode { get; init; }
+        public string? Traceparent { get; init; }
+        public string? Tracestate { get; init; }
     }
 
     internal record SendMessageResponse
@@ -988,5 +1074,8 @@ public sealed partial class CopilotSession : IAsyncDisposable
     [JsonSerializable(typeof(SessionEndHookOutput))]
     [JsonSerializable(typeof(ErrorOccurredHookInput))]
     [JsonSerializable(typeof(ErrorOccurredHookOutput))]
+    [JsonSerializable(typeof(SystemMessageTransformSection))]
+    [JsonSerializable(typeof(SystemMessageTransformRpcResponse))]
+    [JsonSerializable(typeof(Dictionary<string, SystemMessageTransformSection>))]
     internal partial class SessionJsonContext : JsonSerializerContext;
 }

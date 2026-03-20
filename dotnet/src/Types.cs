@@ -63,6 +63,7 @@ public class CopilotClientOptions
         Logger = other.Logger;
         LogLevel = other.LogLevel;
         Port = other.Port;
+        Telemetry = other.Telemetry;
         UseLoggedInUser = other.UseLoggedInUser;
         UseStdio = other.UseStdio;
         OnListModels = other.OnListModels;
@@ -149,6 +150,12 @@ public class CopilotClientOptions
     public Func<CancellationToken, Task<List<ModelInfo>>>? OnListModels { get; set; }
 
     /// <summary>
+    /// OpenTelemetry configuration for the CLI server.
+    /// When set to a non-<see langword="null"/> instance, the CLI server is started with OpenTelemetry instrumentation enabled.
+    /// </summary>
+    public TelemetryConfig? Telemetry { get; set; }
+
+    /// <summary>
     /// Creates a shallow clone of this <see cref="CopilotClientOptions"/> instance.
     /// </summary>
     /// <remarks>
@@ -161,6 +168,52 @@ public class CopilotClientOptions
     {
         return new(this);
     }
+}
+
+/// <summary>
+/// OpenTelemetry configuration for the Copilot CLI server.
+/// </summary>
+public sealed class TelemetryConfig
+{
+    /// <summary>
+    /// OTLP exporter endpoint URL.
+    /// </summary>
+    /// <remarks>
+    /// Maps to the <c>OTEL_EXPORTER_OTLP_ENDPOINT</c> environment variable.
+    /// </remarks>
+    public string? OtlpEndpoint { get; set; }
+
+    /// <summary>
+    /// File path for the file exporter.
+    /// </summary>
+    /// <remarks>
+    /// Maps to the <c>COPILOT_OTEL_FILE_EXPORTER_PATH</c> environment variable.
+    /// </remarks>
+    public string? FilePath { get; set; }
+
+    /// <summary>
+    /// Exporter type (<c>"otlp-http"</c> or <c>"file"</c>).
+    /// </summary>
+    /// <remarks>
+    /// Maps to the <c>COPILOT_OTEL_EXPORTER_TYPE</c> environment variable.
+    /// </remarks>
+    public string? ExporterType { get; set; }
+
+    /// <summary>
+    /// Source name for telemetry spans.
+    /// </summary>
+    /// <remarks>
+    /// Maps to the <c>COPILOT_OTEL_SOURCE_NAME</c> environment variable.
+    /// </remarks>
+    public string? SourceName { get; set; }
+
+    /// <summary>
+    /// Whether to capture message content as part of telemetry.
+    /// </summary>
+    /// <remarks>
+    /// Maps to the <c>OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT</c> environment variable.
+    /// </remarks>
+    public bool? CaptureContent { get; set; }
 }
 
 /// <summary>
@@ -915,7 +968,86 @@ public enum SystemMessageMode
     Append,
     /// <summary>Replace the default system message entirely.</summary>
     [JsonStringEnumMemberName("replace")]
-    Replace
+    Replace,
+    /// <summary>Override individual sections of the system prompt.</summary>
+    [JsonStringEnumMemberName("customize")]
+    Customize
+}
+
+/// <summary>
+/// Specifies the operation to perform on a system prompt section.
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter<SectionOverrideAction>))]
+public enum SectionOverrideAction
+{
+    /// <summary>Replace the section content entirely.</summary>
+    [JsonStringEnumMemberName("replace")]
+    Replace,
+    /// <summary>Remove the section from the prompt.</summary>
+    [JsonStringEnumMemberName("remove")]
+    Remove,
+    /// <summary>Append content after the existing section.</summary>
+    [JsonStringEnumMemberName("append")]
+    Append,
+    /// <summary>Prepend content before the existing section.</summary>
+    [JsonStringEnumMemberName("prepend")]
+    Prepend,
+    /// <summary>Transform the section content via a callback.</summary>
+    [JsonStringEnumMemberName("transform")]
+    Transform
+}
+
+/// <summary>
+/// Override operation for a single system prompt section.
+/// </summary>
+public class SectionOverride
+{
+    /// <summary>
+    /// The operation to perform on this section. Ignored when Transform is set.
+    /// </summary>
+    [JsonPropertyName("action")]
+    public SectionOverrideAction? Action { get; set; }
+
+    /// <summary>
+    /// Content for the override. Optional for all actions. Ignored for remove.
+    /// </summary>
+    [JsonPropertyName("content")]
+    public string? Content { get; set; }
+
+    /// <summary>
+    /// Transform callback. When set, takes precedence over Action.
+    /// Receives current section content, returns transformed content.
+    /// Not serialized — the SDK handles this locally.
+    /// </summary>
+    [JsonIgnore]
+    public Func<string, Task<string>>? Transform { get; set; }
+}
+
+/// <summary>
+/// Known system prompt section identifiers for the "customize" mode.
+/// </summary>
+public static class SystemPromptSections
+{
+    /// <summary>Agent identity preamble and mode statement.</summary>
+    public const string Identity = "identity";
+    /// <summary>Response style, conciseness rules, output formatting preferences.</summary>
+    public const string Tone = "tone";
+    /// <summary>Tool usage patterns, parallel calling, batching guidelines.</summary>
+    public const string ToolEfficiency = "tool_efficiency";
+    /// <summary>CWD, OS, git root, directory listing, available tools.</summary>
+    public const string EnvironmentContext = "environment_context";
+    /// <summary>Coding rules, linting/testing, ecosystem tools, style.</summary>
+    public const string CodeChangeRules = "code_change_rules";
+    /// <summary>Tips, behavioral best practices, behavioral guidelines.</summary>
+    public const string Guidelines = "guidelines";
+    /// <summary>Environment limitations, prohibited actions, security policies.</summary>
+    public const string Safety = "safety";
+    /// <summary>Per-tool usage instructions.</summary>
+    public const string ToolInstructions = "tool_instructions";
+    /// <summary>Repository and organization custom instructions.</summary>
+    public const string CustomInstructions = "custom_instructions";
+    /// <summary>End-of-prompt instructions: parallel tool calling, persistence, task completion.</summary>
+    public const string LastInstructions = "last_instructions";
 }
 
 /// <summary>
@@ -924,13 +1056,21 @@ public enum SystemMessageMode
 public class SystemMessageConfig
 {
     /// <summary>
-    /// How the system message is applied (append or replace).
+    /// How the system message is applied (append, replace, or customize).
     /// </summary>
     public SystemMessageMode? Mode { get; set; }
+
     /// <summary>
-    /// Content of the system message.
+    /// Content of the system message. Used by append and replace modes.
+    /// In customize mode, additional content appended after all sections.
     /// </summary>
     public string? Content { get; set; }
+
+    /// <summary>
+    /// Section-level overrides for customize mode.
+    /// Keys are section identifiers (see <see cref="SystemPromptSections"/>).
+    /// </summary>
+    public Dictionary<string, SectionOverride>? Sections { get; set; }
 }
 
 /// <summary>
@@ -2027,6 +2167,30 @@ public class SetForegroundSessionResponse
     public string? Error { get; set; }
 }
 
+/// <summary>
+/// Content data for a single system prompt section in a transform RPC call.
+/// </summary>
+public class SystemMessageTransformSection
+{
+    /// <summary>
+    /// The content of the section.
+    /// </summary>
+    [JsonPropertyName("content")]
+    public string? Content { get; set; }
+}
+
+/// <summary>
+/// Response to a systemMessage.transform RPC call.
+/// </summary>
+public class SystemMessageTransformRpcResponse
+{
+    /// <summary>
+    /// The transformed sections keyed by section identifier.
+    /// </summary>
+    [JsonPropertyName("sections")]
+    public Dictionary<string, SystemMessageTransformSection>? Sections { get; set; }
+}
+
 [JsonSourceGenerationOptions(
     JsonSerializerDefaults.Web,
     AllowOutOfOrderMetadataProperties = true,
@@ -2058,6 +2222,7 @@ public class SetForegroundSessionResponse
 [JsonSerializable(typeof(ShellExitNotification))]
 [JsonSerializable(typeof(ShellOutputNotification))]
 [JsonSerializable(typeof(SessionListFilter))]
+[JsonSerializable(typeof(SectionOverride))]
 [JsonSerializable(typeof(SessionMetadata))]
 [JsonSerializable(typeof(SetForegroundSessionResponse))]
 [JsonSerializable(typeof(SystemMessageConfig))]

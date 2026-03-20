@@ -14,6 +14,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +27,7 @@ import {
 import { createServerRpc } from "./generated/rpc.js";
 import { getSdkProtocolVersion } from "./sdkProtocolVersion.js";
 import { CopilotSession, NO_RESULT_PERMISSION_V2_ERROR } from "./session.js";
+import { getTraceContext } from "./telemetry.js";
 import type {
     ConnectionState,
     CopilotClientOptions,
@@ -34,6 +36,7 @@ import type {
     GetStatusResponse,
     ModelInfo,
     ResumeSessionConfig,
+    SectionTransformFn,
     SessionConfig,
     SessionContext,
     SessionEvent,
@@ -44,10 +47,13 @@ import type {
     SessionMetadata,
     ShellExitNotification,
     ShellOutputNotification,
+    SystemMessageCustomizeConfig,
+    TelemetryConfig,
     Tool,
     ToolCallRequestPayload,
     ToolCallResponsePayload,
     ToolResultObject,
+    TraceContextProvider,
     TypedSessionLifecycleHandler,
 } from "./types.js";
 
@@ -80,6 +86,45 @@ function toJsonSchema(parameters: Tool["parameters"]): Record<string, unknown> |
     return parameters;
 }
 
+/**
+ * Extract transform callbacks from a system message config and prepare the wire payload.
+ * Function-valued actions are replaced with `{ action: "transform" }` for serialization,
+ * and the original callbacks are returned in a separate map.
+ */
+function extractTransformCallbacks(systemMessage: SessionConfig["systemMessage"]): {
+    wirePayload: SessionConfig["systemMessage"];
+    transformCallbacks: Map<string, SectionTransformFn> | undefined;
+} {
+    if (!systemMessage || systemMessage.mode !== "customize" || !systemMessage.sections) {
+        return { wirePayload: systemMessage, transformCallbacks: undefined };
+    }
+
+    const transformCallbacks = new Map<string, SectionTransformFn>();
+    const wireSections: Record<string, { action: string; content?: string }> = {};
+
+    for (const [sectionId, override] of Object.entries(systemMessage.sections)) {
+        if (!override) continue;
+
+        if (typeof override.action === "function") {
+            transformCallbacks.set(sectionId, override.action);
+            wireSections[sectionId] = { action: "transform" };
+        } else {
+            wireSections[sectionId] = { action: override.action, content: override.content };
+        }
+    }
+
+    if (transformCallbacks.size === 0) {
+        return { wirePayload: systemMessage, transformCallbacks: undefined };
+    }
+
+    const wirePayload: SystemMessageCustomizeConfig = {
+        ...systemMessage,
+        sections: wireSections as SystemMessageCustomizeConfig["sections"],
+    };
+
+    return { wirePayload, transformCallbacks };
+}
+
 function getNodeExecPath(): string {
     if (process.versions.bun) {
         return "node";
@@ -90,14 +135,35 @@ function getNodeExecPath(): string {
 /**
  * Gets the path to the bundled CLI from the @github/copilot package.
  * Uses index.js directly rather than npm-loader.js (which spawns the native binary).
+ *
+ * In ESM, uses import.meta.resolve directly. In CJS (e.g., VS Code extensions
+ * bundled with esbuild format:"cjs"), import.meta is empty so we fall back to
+ * walking node_modules to find the package.
  */
 function getBundledCliPath(): string {
-    // Find the actual location of the @github/copilot package by resolving its sdk export
-    const sdkUrl = import.meta.resolve("@github/copilot/sdk");
-    const sdkPath = fileURLToPath(sdkUrl);
-    // sdkPath is like .../node_modules/@github/copilot/sdk/index.js
-    // Go up two levels to get the package root, then append index.js
-    return join(dirname(dirname(sdkPath)), "index.js");
+    if (typeof import.meta.resolve === "function") {
+        // ESM: resolve via import.meta.resolve
+        const sdkUrl = import.meta.resolve("@github/copilot/sdk");
+        const sdkPath = fileURLToPath(sdkUrl);
+        // sdkPath is like .../node_modules/@github/copilot/sdk/index.js
+        // Go up two levels to get the package root, then append index.js
+        return join(dirname(dirname(sdkPath)), "index.js");
+    }
+
+    // CJS fallback: the @github/copilot package has ESM-only exports so
+    // require.resolve cannot reach it. Walk the module search paths instead.
+    const req = createRequire(__filename);
+    const searchPaths = req.resolve.paths("@github/copilot") ?? [];
+    for (const base of searchPaths) {
+        const candidate = join(base, "@github", "copilot", "index.js");
+        if (existsSync(candidate)) {
+            return candidate;
+        }
+    }
+    throw new Error(
+        `Could not find @github/copilot package. Searched ${searchPaths.length} paths. ` +
+            `Ensure it is installed, or pass cliPath/cliUrl to CopilotClient.`
+    );
 }
 
 /**
@@ -145,17 +211,25 @@ export class CopilotClient {
     private options: Required<
         Omit<
             CopilotClientOptions,
-            "cliPath" | "cliUrl" | "githubToken" | "useLoggedInUser" | "onListModels"
+            | "cliPath"
+            | "cliUrl"
+            | "githubToken"
+            | "useLoggedInUser"
+            | "onListModels"
+            | "telemetry"
+            | "onGetTraceContext"
         >
     > & {
         cliPath?: string;
         cliUrl?: string;
         githubToken?: string;
         useLoggedInUser?: boolean;
+        telemetry?: TelemetryConfig;
     };
     private isExternalServer: boolean = false;
     private forceStopping: boolean = false;
     private onListModels?: () => Promise<ModelInfo[]> | ModelInfo[];
+    private onGetTraceContext?: TraceContextProvider;
     private modelsCache: ModelInfo[] | null = null;
     private modelsCacheLock: Promise<void> = Promise.resolve();
     private sessionLifecycleHandlers: Set<SessionLifecycleHandler> = new Set();
@@ -235,6 +309,7 @@ export class CopilotClient {
         }
 
         this.onListModels = options.onListModels;
+        this.onGetTraceContext = options.onGetTraceContext;
 
         this.options = {
             cliPath: options.cliUrl ? undefined : options.cliPath || getBundledCliPath(),
@@ -252,6 +327,7 @@ export class CopilotClient {
             githubToken: options.githubToken,
             // Default useLoggedInUser to false when githubToken is provided, otherwise true
             useLoggedInUser: options.useLoggedInUser ?? (options.githubToken ? false : true),
+            telemetry: options.telemetry,
         };
     }
 
@@ -559,9 +635,14 @@ export class CopilotClient {
 
         // Create and register the session before issuing the RPC so that
         // events emitted by the CLI (e.g. session.start) are not dropped.
-        const session = new CopilotSession(sessionId, this.connection!);
+        const session = new CopilotSession(
+            sessionId,
+            this.connection!,
+            undefined,
+            this.onGetTraceContext
+        );
         session._setShellProcessCallbacks(
-            (processId, session) => this.shellProcessMap.set(processId, session),
+            (processId, trackedSession) => this.shellProcessMap.set(processId, trackedSession),
             (processId) => this.shellProcessMap.delete(processId)
         );
         session.registerTools(config.tools);
@@ -572,6 +653,15 @@ export class CopilotClient {
         if (config.hooks) {
             session.registerHooks(config.hooks);
         }
+
+        // Extract transform callbacks from system message config before serialization.
+        const { wirePayload: wireSystemMessage, transformCallbacks } = extractTransformCallbacks(
+            config.systemMessage
+        );
+        if (transformCallbacks) {
+            session.registerTransformCallbacks(transformCallbacks);
+        }
+
         if (config.onEvent) {
             session.on(config.onEvent);
         }
@@ -579,6 +669,7 @@ export class CopilotClient {
 
         try {
             const response = await this.connection!.sendRequest("session.create", {
+                ...(await getTraceContext(this.onGetTraceContext)),
                 model: config.model,
                 sessionId,
                 clientName: config.clientName,
@@ -590,7 +681,7 @@ export class CopilotClient {
                     overridesBuiltInTool: tool.overridesBuiltInTool,
                     skipPermission: tool.skipPermission,
                 })),
-                systemMessage: config.systemMessage,
+                systemMessage: wireSystemMessage,
                 availableTools: config.availableTools,
                 excludedTools: config.excludedTools,
                 provider: config.provider,
@@ -663,9 +754,14 @@ export class CopilotClient {
 
         // Create and register the session before issuing the RPC so that
         // events emitted by the CLI (e.g. session.start) are not dropped.
-        const session = new CopilotSession(sessionId, this.connection!);
+        const session = new CopilotSession(
+            sessionId,
+            this.connection!,
+            undefined,
+            this.onGetTraceContext
+        );
         session._setShellProcessCallbacks(
-            (processId, session) => this.shellProcessMap.set(processId, session),
+            (processId, trackedSession) => this.shellProcessMap.set(processId, trackedSession),
             (processId) => this.shellProcessMap.delete(processId)
         );
         session.registerTools(config.tools);
@@ -676,6 +772,15 @@ export class CopilotClient {
         if (config.hooks) {
             session.registerHooks(config.hooks);
         }
+
+        // Extract transform callbacks from system message config before serialization.
+        const { wirePayload: wireSystemMessage, transformCallbacks } = extractTransformCallbacks(
+            config.systemMessage
+        );
+        if (transformCallbacks) {
+            session.registerTransformCallbacks(transformCallbacks);
+        }
+
         if (config.onEvent) {
             session.on(config.onEvent);
         }
@@ -683,11 +788,12 @@ export class CopilotClient {
 
         try {
             const response = await this.connection!.sendRequest("session.resume", {
+                ...(await getTraceContext(this.onGetTraceContext)),
                 sessionId,
                 clientName: config.clientName,
                 model: config.model,
                 reasoningEffort: config.reasoningEffort,
-                systemMessage: config.systemMessage,
+                systemMessage: wireSystemMessage,
                 availableTools: config.availableTools,
                 excludedTools: config.excludedTools,
                 tools: config.tools?.map((tool) => ({
@@ -1159,6 +1265,24 @@ export class CopilotClient {
                 );
             }
 
+            // Set OpenTelemetry environment variables if telemetry is configured
+            if (this.options.telemetry) {
+                const t = this.options.telemetry;
+                envWithoutNodeDebug.COPILOT_OTEL_ENABLED = "true";
+                if (t.otlpEndpoint !== undefined)
+                    envWithoutNodeDebug.OTEL_EXPORTER_OTLP_ENDPOINT = t.otlpEndpoint;
+                if (t.filePath !== undefined)
+                    envWithoutNodeDebug.COPILOT_OTEL_FILE_EXPORTER_PATH = t.filePath;
+                if (t.exporterType !== undefined)
+                    envWithoutNodeDebug.COPILOT_OTEL_EXPORTER_TYPE = t.exporterType;
+                if (t.sourceName !== undefined)
+                    envWithoutNodeDebug.COPILOT_OTEL_SOURCE_NAME = t.sourceName;
+                if (t.captureContent !== undefined)
+                    envWithoutNodeDebug.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = String(
+                        t.captureContent
+                    );
+            }
+
             // Verify CLI exists before attempting to spawn
             if (!existsSync(this.options.cliPath)) {
                 throw new Error(
@@ -1431,6 +1555,15 @@ export class CopilotClient {
             }): Promise<{ output?: unknown }> => await this.handleHooksInvoke(params)
         );
 
+        this.connection.onRequest(
+            "systemMessage.transform",
+            async (params: {
+                sessionId: string;
+                sections: Record<string, { content: string }>;
+            }): Promise<{ sections: Record<string, { content: string }> }> =>
+                await this.handleSystemMessageTransform(params)
+        );
+
         this.connection.onClose(() => {
             this.state = "disconnected";
         });
@@ -1494,40 +1627,50 @@ export class CopilotClient {
     }
 
     private handleShellOutputNotification(notification: unknown): void {
-        if (
-            typeof notification !== "object" ||
-            !notification ||
-            !("processId" in notification) ||
-            typeof (notification as { processId?: unknown }).processId !== "string"
-        ) {
+        if (typeof notification !== "object" || !notification) {
             return;
         }
 
-        const { processId } = notification as { processId: string };
-        const session = this.shellProcessMap.get(processId);
+        const session = this.getSessionForShellNotification(
+            notification as { sessionId?: unknown; processId?: unknown }
+        );
         if (session) {
             session._dispatchShellOutput(notification as ShellOutputNotification);
         }
     }
 
     private handleShellExitNotification(notification: unknown): void {
-        if (
-            typeof notification !== "object" ||
-            !notification ||
-            !("processId" in notification) ||
-            typeof (notification as { processId?: unknown }).processId !== "string"
-        ) {
+        if (typeof notification !== "object" || !notification) {
             return;
         }
 
-        const { processId } = notification as { processId: string };
-        const session = this.shellProcessMap.get(processId);
+        const typedNotification = notification as { sessionId?: unknown; processId?: unknown };
+        const session = this.getSessionForShellNotification(typedNotification);
         if (session) {
             session._dispatchShellExit(notification as ShellExitNotification);
-            // Clean up the mapping after exit
-            this.shellProcessMap.delete(processId);
-            session._untrackShellProcess(processId);
+            if (typeof typedNotification.processId === "string") {
+                this.shellProcessMap.delete(typedNotification.processId);
+                session._untrackShellProcess(typedNotification.processId);
+            }
         }
+    }
+
+    private getSessionForShellNotification(notification: {
+        sessionId?: unknown;
+        processId?: unknown;
+    }): CopilotSession | undefined {
+        if (typeof notification.sessionId === "string") {
+            const session = this.sessions.get(notification.sessionId);
+            if (session) {
+                return session;
+            }
+        }
+
+        if (typeof notification.processId === "string") {
+            return this.shellProcessMap.get(notification.processId);
+        }
+
+        return undefined;
     }
 
     private async handleUserInputRequest(params: {
@@ -1579,6 +1722,27 @@ export class CopilotClient {
         return { output };
     }
 
+    private async handleSystemMessageTransform(params: {
+        sessionId: string;
+        sections: Record<string, { content: string }>;
+    }): Promise<{ sections: Record<string, { content: string }> }> {
+        if (
+            !params ||
+            typeof params.sessionId !== "string" ||
+            !params.sections ||
+            typeof params.sections !== "object"
+        ) {
+            throw new Error("Invalid systemMessage.transform payload");
+        }
+
+        const session = this.sessions.get(params.sessionId);
+        if (!session) {
+            throw new Error(`Session not found: ${params.sessionId}`);
+        }
+
+        return await session._handleSystemMessageTransform(params.sections);
+    }
+
     // ========================================================================
     // Protocol v2 backward-compatibility adapters
     // ========================================================================
@@ -1618,11 +1782,15 @@ export class CopilotClient {
         }
 
         try {
+            const traceparent = (params as { traceparent?: string }).traceparent;
+            const tracestate = (params as { tracestate?: string }).tracestate;
             const invocation = {
                 sessionId: params.sessionId,
                 toolCallId: params.toolCallId,
                 toolName: params.toolName,
                 arguments: params.arguments,
+                traceparent,
+                tracestate,
             };
             const result = await handler(params.arguments, invocation);
             return { result: this.normalizeToolResultV2(result) };

@@ -61,6 +61,33 @@ type ClientOptions struct {
 	// querying the CLI server. Useful in BYOK mode to return models
 	// available from your custom provider.
 	OnListModels func(ctx context.Context) ([]ModelInfo, error)
+	// Telemetry configures OpenTelemetry integration for the Copilot CLI process.
+	// When non-nil, COPILOT_OTEL_ENABLED=true is set and any populated fields
+	// are mapped to the corresponding environment variables.
+	Telemetry *TelemetryConfig
+}
+
+// TelemetryConfig configures OpenTelemetry integration for the Copilot CLI process.
+type TelemetryConfig struct {
+	// OTLPEndpoint is the OTLP HTTP endpoint URL for trace/metric export.
+	// Sets OTEL_EXPORTER_OTLP_ENDPOINT.
+	OTLPEndpoint string
+
+	// FilePath is the file path for JSON-lines trace output.
+	// Sets COPILOT_OTEL_FILE_EXPORTER_PATH.
+	FilePath string
+
+	// ExporterType is the exporter backend type: "otlp-http" or "file".
+	// Sets COPILOT_OTEL_EXPORTER_TYPE.
+	ExporterType string
+
+	// SourceName is the instrumentation scope name.
+	// Sets COPILOT_OTEL_SOURCE_NAME.
+	SourceName string
+
+	// CaptureContent controls whether to capture message content (prompts, responses).
+	// Sets OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT.
+	CaptureContent *bool
 }
 
 // Bool returns a pointer to the given bool value.
@@ -84,6 +111,51 @@ func Float64(v float64) *float64 {
 	return &v
 }
 
+// Known system prompt section identifiers for the "customize" mode.
+const (
+	SectionIdentity           = "identity"
+	SectionTone               = "tone"
+	SectionToolEfficiency     = "tool_efficiency"
+	SectionEnvironmentContext = "environment_context"
+	SectionCodeChangeRules    = "code_change_rules"
+	SectionGuidelines         = "guidelines"
+	SectionSafety             = "safety"
+	SectionToolInstructions   = "tool_instructions"
+	SectionCustomInstructions = "custom_instructions"
+	SectionLastInstructions   = "last_instructions"
+)
+
+// SectionOverrideAction represents the action to perform on a system prompt section.
+type SectionOverrideAction string
+
+const (
+	// SectionActionReplace replaces section content entirely.
+	SectionActionReplace SectionOverrideAction = "replace"
+	// SectionActionRemove removes the section.
+	SectionActionRemove SectionOverrideAction = "remove"
+	// SectionActionAppend appends to existing section content.
+	SectionActionAppend SectionOverrideAction = "append"
+	// SectionActionPrepend prepends to existing section content.
+	SectionActionPrepend SectionOverrideAction = "prepend"
+)
+
+// SectionTransformFn is a callback that receives the current content of a system prompt section
+// and returns the transformed content. Used with the "transform" action to read-then-write
+// modify sections at runtime.
+type SectionTransformFn func(currentContent string) (string, error)
+
+// SectionOverride defines an override operation for a single system prompt section.
+type SectionOverride struct {
+	// Action is the operation to perform: "replace", "remove", "append", "prepend", or "transform".
+	Action SectionOverrideAction `json:"action,omitempty"`
+	// Content for the override. Optional for all actions. Ignored for "remove".
+	Content string `json:"content,omitempty"`
+	// Transform is a callback invoked when Action is "transform".
+	// The runtime calls this with the current section content and uses the returned string.
+	// Excluded from JSON serialization; the SDK registers it as an RPC callback internally.
+	Transform SectionTransformFn `json:"-"`
+}
+
 // SystemMessageAppendConfig is append mode: use CLI foundation with optional appended content.
 type SystemMessageAppendConfig struct {
 	// Mode is optional, defaults to "append"
@@ -102,11 +174,15 @@ type SystemMessageReplaceConfig struct {
 }
 
 // SystemMessageConfig represents system message configuration for session creation.
-// Use SystemMessageAppendConfig for default behavior, SystemMessageReplaceConfig for full control.
-// In Go, use one struct or the other based on your needs.
+//   - Append mode (default): SDK foundation + optional custom content
+//   - Replace mode: Full control, caller provides entire system message
+//   - Customize mode: Section-level overrides with graceful fallback
+//
+// In Go, use one struct and set fields appropriate for the desired mode.
 type SystemMessageConfig struct {
-	Mode    string `json:"mode,omitempty"`
-	Content string `json:"content,omitempty"`
+	Mode     string                     `json:"mode,omitempty"`
+	Content  string                     `json:"content,omitempty"`
+	Sections map[string]SectionOverride `json:"sections,omitempty"`
 }
 
 // PermissionRequestResultKind represents the kind of a permission request result.
@@ -429,6 +505,12 @@ type ToolInvocation struct {
 	ToolCallID string
 	ToolName   string
 	Arguments  any
+
+	// TraceContext carries the W3C Trace Context propagated from the CLI's
+	// execute_tool span.  Pass this to OpenTelemetry-aware code so that
+	// child spans created inside the handler are parented to the CLI span.
+	// When no trace context is available this will be context.Background().
+	TraceContext context.Context
 }
 
 // ToolHandler executes a tool invocation.
@@ -718,6 +800,8 @@ type createSessionRequest struct {
 	SkillDirectories  []string                   `json:"skillDirectories,omitempty"`
 	DisabledSkills    []string                   `json:"disabledSkills,omitempty"`
 	InfiniteSessions  *InfiniteSessionConfig     `json:"infiniteSessions,omitempty"`
+	Traceparent       string                     `json:"traceparent,omitempty"`
+	Tracestate        string                     `json:"tracestate,omitempty"`
 }
 
 // createSessionResponse is the response from session.create
@@ -751,6 +835,8 @@ type resumeSessionRequest struct {
 	SkillDirectories  []string                   `json:"skillDirectories,omitempty"`
 	DisabledSkills    []string                   `json:"disabledSkills,omitempty"`
 	InfiniteSessions  *InfiniteSessionConfig     `json:"infiniteSessions,omitempty"`
+	Traceparent       string                     `json:"traceparent,omitempty"`
+	Tracestate        string                     `json:"tracestate,omitempty"`
 }
 
 // resumeSessionResponse is the response from session.resume
@@ -879,6 +965,8 @@ type sessionSendRequest struct {
 	Prompt      string       `json:"prompt"`
 	Attachments []Attachment `json:"attachments,omitempty"`
 	Mode        string       `json:"mode,omitempty"`
+	Traceparent string       `json:"traceparent,omitempty"`
+	Tracestate  string       `json:"tracestate,omitempty"`
 }
 
 // sessionSendResponse is the response from session.send

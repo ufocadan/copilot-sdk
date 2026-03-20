@@ -14,6 +14,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using System.Text.RegularExpressions;
 using GitHub.Copilot.SDK.Rpc;
 using System.Globalization;
@@ -365,6 +366,44 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         }
     }
 
+    private static (SystemMessageConfig? wireConfig, Dictionary<string, Func<string, Task<string>>>? callbacks) ExtractTransformCallbacks(SystemMessageConfig? systemMessage)
+    {
+        if (systemMessage?.Mode != SystemMessageMode.Customize || systemMessage.Sections == null)
+        {
+            return (systemMessage, null);
+        }
+
+        var callbacks = new Dictionary<string, Func<string, Task<string>>>();
+        var wireSections = new Dictionary<string, SectionOverride>();
+
+        foreach (var (sectionId, sectionOverride) in systemMessage.Sections)
+        {
+            if (sectionOverride.Transform != null)
+            {
+                callbacks[sectionId] = sectionOverride.Transform;
+                wireSections[sectionId] = new SectionOverride { Action = SectionOverrideAction.Transform };
+            }
+            else
+            {
+                wireSections[sectionId] = sectionOverride;
+            }
+        }
+
+        if (callbacks.Count == 0)
+        {
+            return (systemMessage, null);
+        }
+
+        var wireConfig = new SystemMessageConfig
+        {
+            Mode = systemMessage.Mode,
+            Content = systemMessage.Content,
+            Sections = wireSections
+        };
+
+        return (wireConfig, callbacks);
+    }
+
     /// <summary>
     /// Creates a new Copilot session with the specified configuration.
     /// </summary>
@@ -409,6 +448,8 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
             config.Hooks.OnSessionEnd != null ||
             config.Hooks.OnErrorOccurred != null);
 
+        var (wireSystemMessage, transformCallbacks) = ExtractTransformCallbacks(config.SystemMessage);
+
         var sessionId = config.SessionId ?? Guid.NewGuid().ToString();
 
         // Create and register the session before issuing the RPC so that
@@ -424,6 +465,10 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         {
             session.RegisterHooks(config.Hooks);
         }
+        if (transformCallbacks != null)
+        {
+            session.RegisterTransformCallbacks(transformCallbacks);
+        }
         if (config.OnEvent != null)
         {
             session.On(config.OnEvent);
@@ -435,13 +480,15 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
 
         try
         {
+            var (traceparent, tracestate) = TelemetryHelpers.GetTraceContext();
+
             var request = new CreateSessionRequest(
                 config.Model,
                 sessionId,
                 config.ClientName,
                 config.ReasoningEffort,
                 config.Tools?.Select(ToolDefinition.FromAIFunction).ToList(),
-                config.SystemMessage,
+                wireSystemMessage,
                 config.AvailableTools,
                 config.ExcludedTools,
                 config.Provider,
@@ -457,7 +504,9 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
                 config.ConfigDir,
                 config.SkillDirectories,
                 config.DisabledSkills,
-                config.InfiniteSessions);
+                config.InfiniteSessions,
+                traceparent,
+                tracestate);
 
             var response = await InvokeRpcAsync<CreateSessionResponse>(
                 connection.Rpc, "session.create", [request], cancellationToken);
@@ -518,6 +567,8 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
             config.Hooks.OnSessionEnd != null ||
             config.Hooks.OnErrorOccurred != null);
 
+        var (wireSystemMessage, transformCallbacks) = ExtractTransformCallbacks(config.SystemMessage);
+
         // Create and register the session before issuing the RPC so that
         // events emitted by the CLI (e.g. session.start) are not dropped.
         var session = new CopilotSession(sessionId, connection.Rpc, _logger);
@@ -531,6 +582,10 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         {
             session.RegisterHooks(config.Hooks);
         }
+        if (transformCallbacks != null)
+        {
+            session.RegisterTransformCallbacks(transformCallbacks);
+        }
         if (config.OnEvent != null)
         {
             session.On(config.OnEvent);
@@ -542,13 +597,15 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
 
         try
         {
+            var (traceparent, tracestate) = TelemetryHelpers.GetTraceContext();
+
             var request = new ResumeSessionRequest(
                 sessionId,
                 config.ClientName,
                 config.Model,
                 config.ReasoningEffort,
                 config.Tools?.Select(ToolDefinition.FromAIFunction).ToList(),
-                config.SystemMessage,
+                wireSystemMessage,
                 config.AvailableTools,
                 config.ExcludedTools,
                 config.Provider,
@@ -565,7 +622,9 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
                 config.Agent,
                 config.SkillDirectories,
                 config.DisabledSkills,
-                config.InfiniteSessions);
+                config.InfiniteSessions,
+                traceparent,
+                tracestate);
 
             var response = await InvokeRpcAsync<ResumeSessionResponse>(
                 connection.Rpc, "session.resume", [request], cancellationToken);
@@ -1077,6 +1136,17 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
             startInfo.Environment["COPILOT_SDK_AUTH_TOKEN"] = options.GitHubToken;
         }
 
+        // Set telemetry environment variables if configured
+        if (options.Telemetry is { } telemetry)
+        {
+            startInfo.Environment["COPILOT_OTEL_ENABLED"] = "true";
+            if (telemetry.OtlpEndpoint is not null) startInfo.Environment["OTEL_EXPORTER_OTLP_ENDPOINT"] = telemetry.OtlpEndpoint;
+            if (telemetry.FilePath is not null) startInfo.Environment["COPILOT_OTEL_FILE_EXPORTER_PATH"] = telemetry.FilePath;
+            if (telemetry.ExporterType is not null) startInfo.Environment["COPILOT_OTEL_EXPORTER_TYPE"] = telemetry.ExporterType;
+            if (telemetry.SourceName is not null) startInfo.Environment["COPILOT_OTEL_SOURCE_NAME"] = telemetry.SourceName;
+            if (telemetry.CaptureContent is { } capture) startInfo.Environment["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"] = capture ? "true" : "false";
+        }
+
         var cliProcess = new Process { StartInfo = startInfo };
         cliProcess.Start();
 
@@ -1211,6 +1281,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         rpc.AddLocalRpcMethod("hooks.invoke", handler.OnHooksInvoke);
         rpc.AddLocalRpcMethod("shell.output", handler.OnShellOutput);
         rpc.AddLocalRpcMethod("shell.exit", handler.OnShellExit);
+        rpc.AddLocalRpcMethod("systemMessage.transform", handler.OnSystemMessageTransform);
         rpc.StartListening();
 
         // Transition state to Disconnected if the JSON-RPC connection drops
@@ -1243,6 +1314,12 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         options.TypeInfoResolverChain.Add(CopilotSession.SessionJsonContext.Default);
         options.TypeInfoResolverChain.Add(SessionEventsJsonContext.Default);
         options.TypeInfoResolverChain.Add(SDK.Rpc.RpcJsonContext.Default);
+
+        // StreamJsonRpc's RequestId needs serialization when CancellationToken fires during
+        // JSON-RPC operations. Its built-in converter (RequestIdSTJsonConverter) is internal,
+        // and [JsonSerializable] can't source-gen for it (SYSLIB1220), so we provide our own
+        // AOT-safe resolver + converter.
+        options.TypeInfoResolverChain.Add(new RequestIdTypeInfoResolver());
 
         options.MakeReadOnly();
 
@@ -1333,13 +1410,23 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
             return new HooksInvokeResponse(output);
         }
 
+        public async Task<SystemMessageTransformRpcResponse> OnSystemMessageTransform(string sessionId, JsonElement sections)
+        {
+            var session = client.GetSession(sessionId) ?? throw new ArgumentException($"Unknown session {sessionId}");
+            return await session.HandleSystemMessageTransformAsync(sections);
+        }
+
         // Protocol v2 backward-compatibility adapters
 
         public async Task<ToolCallResponseV2> OnToolCallV2(string sessionId,
             string toolCallId,
             string toolName,
-            object? arguments)
+            object? arguments,
+            string? traceparent = null,
+            string? tracestate = null)
         {
+            using var _ = TelemetryHelpers.RestoreTraceContext(traceparent, tracestate);
+
             var session = client.GetSession(sessionId) ?? throw new ArgumentException($"Unknown session {sessionId}");
             if (session.GetTool(toolName) is not { } tool)
             {
@@ -1431,12 +1518,24 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
             }
         }
 
-        public void OnShellOutput(string processId, string stream, string data)
+        public void OnShellOutput(string processId, string stream, string data, string? sessionId = null)
         {
-            if (client._shellProcessMap.TryGetValue(processId, out var session))
+            CopilotSession? session = null;
+            if (!string.IsNullOrEmpty(sessionId))
+            {
+                session = client.GetSession(sessionId!);
+            }
+
+            if (session is null)
+            {
+                client._shellProcessMap.TryGetValue(processId, out session);
+            }
+
+            if (session is not null)
             {
                 session.DispatchShellOutput(new ShellOutputNotification
                 {
+                    SessionId = sessionId,
                     ProcessId = processId,
                     Stream = stream,
                     Data = data,
@@ -1444,12 +1543,24 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
             }
         }
 
-        public void OnShellExit(string processId, int exitCode)
+        public void OnShellExit(string processId, int exitCode, string? sessionId = null)
         {
-            if (client._shellProcessMap.TryGetValue(processId, out var session))
+            CopilotSession? session = null;
+            if (!string.IsNullOrEmpty(sessionId))
+            {
+                session = client.GetSession(sessionId!);
+            }
+
+            if (session is null)
+            {
+                client._shellProcessMap.TryGetValue(processId, out session);
+            }
+
+            if (session is not null)
             {
                 session.DispatchShellExit(new ShellExitNotification
                 {
+                    SessionId = sessionId,
                     ProcessId = processId,
                     ExitCode = exitCode,
                 });
@@ -1507,7 +1618,9 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         string? ConfigDir,
         List<string>? SkillDirectories,
         List<string>? DisabledSkills,
-        InfiniteSessionConfig? InfiniteSessions);
+        InfiniteSessionConfig? InfiniteSessions,
+        string? Traceparent = null,
+        string? Tracestate = null);
 
     internal record ToolDefinition(
         string Name,
@@ -1553,7 +1666,9 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         string? Agent,
         List<string>? SkillDirectories,
         List<string>? DisabledSkills,
-        InfiniteSessionConfig? InfiniteSessions);
+        InfiniteSessionConfig? InfiniteSessions,
+        string? Traceparent = null,
+        string? Tracestate = null);
 
     internal record ResumeSessionResponse(
         string SessionId,
@@ -1688,6 +1803,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
     [JsonSerializable(typeof(ResumeSessionResponse))]
     [JsonSerializable(typeof(SessionMetadata))]
     [JsonSerializable(typeof(SystemMessageConfig))]
+    [JsonSerializable(typeof(SystemMessageTransformRpcResponse))]
     [JsonSerializable(typeof(ToolCallResponseV2))]
     [JsonSerializable(typeof(ToolDefinition))]
     [JsonSerializable(typeof(ToolResultAIContent))]
@@ -1696,6 +1812,50 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
     [JsonSerializable(typeof(UserInputRequest))]
     [JsonSerializable(typeof(UserInputResponse))]
     internal partial class ClientJsonContext : JsonSerializerContext;
+
+    /// <summary>
+    /// AOT-safe type info resolver for <see cref="RequestId"/>.
+    /// StreamJsonRpc's own RequestIdSTJsonConverter is internal (SYSLIB1220/CS0122),
+    /// so we provide our own converter and wire it through <see cref="JsonMetadataServices.CreateValueInfo{T}"/>
+    /// to stay fully AOT/trimming-compatible.
+    /// </summary>
+    private sealed class RequestIdTypeInfoResolver : IJsonTypeInfoResolver
+    {
+        public JsonTypeInfo? GetTypeInfo(Type type, JsonSerializerOptions options)
+        {
+            if (type == typeof(RequestId))
+                return JsonMetadataServices.CreateValueInfo<RequestId>(options, new RequestIdJsonConverter());
+            return null;
+        }
+    }
+
+    private sealed class RequestIdJsonConverter : JsonConverter<RequestId>
+    {
+        public override RequestId Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            return reader.TokenType switch
+            {
+                JsonTokenType.Number => reader.TryGetInt64(out long val)
+                    ? new RequestId(val)
+                    : new RequestId(reader.HasValueSequence
+                        ? Encoding.UTF8.GetString(reader.ValueSequence)
+                        : Encoding.UTF8.GetString(reader.ValueSpan)),
+                JsonTokenType.String => new RequestId(reader.GetString()!),
+                JsonTokenType.Null => RequestId.Null,
+                _ => throw new JsonException($"Unexpected token type for RequestId: {reader.TokenType}"),
+            };
+        }
+
+        public override void Write(Utf8JsonWriter writer, RequestId value, JsonSerializerOptions options)
+        {
+            if (value.Number.HasValue)
+                writer.WriteNumberValue(value.Number.Value);
+            else if (value.String is not null)
+                writer.WriteStringValue(value.String);
+            else
+                writer.WriteNullValue();
+        }
+    }
 
     [GeneratedRegex(@"listening on port ([0-9]+)", RegexOptions.IgnoreCase)]
     private static partial Regex ListeningOnPortRegex();

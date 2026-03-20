@@ -10,11 +10,14 @@
 import type { MessageConnection } from "vscode-jsonrpc/node.js";
 import { ConnectionError, ResponseError } from "vscode-jsonrpc/node.js";
 import { createSessionRpc } from "./generated/rpc.js";
+import { getTraceContext } from "./telemetry.js";
 import type {
     MessageOptions,
     PermissionHandler,
     PermissionRequest,
     PermissionRequestResult,
+    ReasoningEffort,
+    SectionTransformFn,
     SessionEvent,
     SessionEventHandler,
     SessionEventPayload,
@@ -26,6 +29,7 @@ import type {
     ShellOutputNotification,
     Tool,
     ToolHandler,
+    TraceContextProvider,
     TypedSessionEventHandler,
     UserInputHandler,
     UserInputRequest,
@@ -76,7 +80,9 @@ export class CopilotSession {
     private trackedProcessIds: Set<string> = new Set();
     private _registerShellProcess?: (processId: string, session: CopilotSession) => void;
     private _unregisterShellProcess?: (processId: string) => void;
+    private transformCallbacks?: Map<string, SectionTransformFn>;
     private _rpc: ReturnType<typeof createSessionRpc> | null = null;
+    private traceContextProvider?: TraceContextProvider;
 
     /**
      * Creates a new CopilotSession instance.
@@ -84,20 +90,31 @@ export class CopilotSession {
      * @param sessionId - The unique identifier for this session
      * @param connection - The JSON-RPC message connection to the Copilot CLI
      * @param workspacePath - Path to the session workspace directory (when infinite sessions enabled)
+     * @param traceContextProvider - Optional callback to get W3C Trace Context for outbound RPCs
      * @internal This constructor is internal. Use {@link CopilotClient.createSession} to create sessions.
      */
     constructor(
         public readonly sessionId: string,
         private connection: MessageConnection,
-        private _workspacePath?: string
-    ) {}
+        private _workspacePath?: string,
+        traceContextProvider?: TraceContextProvider
+    ) {
+        this.traceContextProvider = traceContextProvider;
+    }
 
     /**
      * Typed session-scoped RPC methods.
      */
     get rpc(): ReturnType<typeof createSessionRpc> {
         if (!this._rpc) {
-            this._rpc = createSessionRpc(this.connection, this.sessionId);
+            const rpc = createSessionRpc(this.connection, this.sessionId);
+            const exec = rpc.shell.exec;
+            rpc.shell.exec = async (params) => {
+                const result = await exec(params);
+                this._trackShellProcess(result.processId);
+                return result;
+            };
+            this._rpc = rpc;
         }
         return this._rpc;
     }
@@ -131,6 +148,7 @@ export class CopilotSession {
      */
     async send(options: MessageOptions): Promise<string> {
         const response = await this.connection.sendRequest("session.send", {
+            ...(await getTraceContext(this.traceContextProvider)),
             sessionId: this.sessionId,
             prompt: options.prompt,
             attachments: options.attachments,
@@ -444,9 +462,19 @@ export class CopilotSession {
             };
             const args = (event.data as { arguments: unknown }).arguments;
             const toolCallId = (event.data as { toolCallId: string }).toolCallId;
+            const traceparent = (event.data as { traceparent?: string }).traceparent;
+            const tracestate = (event.data as { tracestate?: string }).tracestate;
             const handler = this.toolHandlers.get(toolName);
             if (handler) {
-                void this._executeToolAndRespond(requestId, toolName, toolCallId, args, handler);
+                void this._executeToolAndRespond(
+                    requestId,
+                    toolName,
+                    toolCallId,
+                    args,
+                    handler,
+                    traceparent,
+                    tracestate
+                );
             }
         } else if (event.type === "permission.requested") {
             const { requestId, permissionRequest } = event.data as {
@@ -468,7 +496,9 @@ export class CopilotSession {
         toolName: string,
         toolCallId: string,
         args: unknown,
-        handler: ToolHandler
+        handler: ToolHandler,
+        traceparent?: string,
+        tracestate?: string
     ): Promise<void> {
         try {
             const rawResult = await handler(args, {
@@ -476,6 +506,8 @@ export class CopilotSession {
                 toolCallId,
                 toolName,
                 arguments: args,
+                traceparent,
+                tracestate,
             });
             let result: string;
             if (rawResult == null) {
@@ -600,6 +632,48 @@ export class CopilotSession {
      */
     registerHooks(hooks?: SessionHooks): void {
         this.hooks = hooks;
+    }
+
+    /**
+     * Registers transform callbacks for system message sections.
+     *
+     * @param callbacks - Map of section ID to transform callback, or undefined to clear
+     * @internal This method is typically called internally when creating a session.
+     */
+    registerTransformCallbacks(callbacks?: Map<string, SectionTransformFn>): void {
+        this.transformCallbacks = callbacks;
+    }
+
+    /**
+     * Handles a systemMessage.transform request from the runtime.
+     * Dispatches each section to its registered transform callback.
+     *
+     * @param sections - Map of section IDs to their current rendered content
+     * @returns A promise that resolves with the transformed sections
+     * @internal This method is for internal use by the SDK.
+     */
+    async _handleSystemMessageTransform(
+        sections: Record<string, { content: string }>
+    ): Promise<{ sections: Record<string, { content: string }> }> {
+        const result: Record<string, { content: string }> = {};
+
+        for (const [sectionId, { content }] of Object.entries(sections)) {
+            const callback = this.transformCallbacks?.get(sectionId);
+            if (callback) {
+                try {
+                    const transformed = await callback(content);
+                    result[sectionId] = { content: transformed };
+                } catch (_error) {
+                    // Callback failed — return original content
+                    result[sectionId] = { content };
+                }
+            } else {
+                // No callback for this section — pass through unchanged
+                result[sectionId] = { content };
+            }
+        }
+
+        return { sections: result };
     }
 
     /**
@@ -811,14 +885,16 @@ export class CopilotSession {
      * The new model takes effect for the next message. Conversation history is preserved.
      *
      * @param model - Model ID to switch to
+     * @param options - Optional settings for the new model
      *
      * @example
      * ```typescript
      * await session.setModel("gpt-4.1");
+     * await session.setModel("claude-sonnet-4.6", { reasoningEffort: "high" });
      * ```
      */
-    async setModel(model: string): Promise<void> {
-        await this.rpc.model.switchTo({ modelId: model });
+    async setModel(model: string, options?: { reasoningEffort?: ReasoningEffort }): Promise<void> {
+        await this.rpc.model.switchTo({ modelId: model, ...options });
     }
 
     /**

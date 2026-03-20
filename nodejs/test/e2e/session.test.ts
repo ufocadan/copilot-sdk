@@ -96,6 +96,33 @@ describe("Sessions", async () => {
         expect(systemMessage).toEqual(testSystemMessage); // Exact match
     });
 
+    it("should create a session with customized systemMessage config", async () => {
+        const customTone = "Respond in a warm, professional tone. Be thorough in explanations.";
+        const appendedContent = "Always mention quarterly earnings.";
+        const session = await client.createSession({
+            onPermissionRequest: approveAll,
+            systemMessage: {
+                mode: "customize",
+                sections: {
+                    tone: { action: "replace", content: customTone },
+                    code_change_rules: { action: "remove" },
+                },
+                content: appendedContent,
+            },
+        });
+
+        const assistantMessage = await session.sendAndWait({ prompt: "Who are you?" });
+        expect(assistantMessage?.data.content).toBeDefined();
+
+        // Validate the system message sent to the model
+        const traffic = await openAiEndpoint.getExchanges();
+        const systemMessage = getSystemMessage(traffic[0]);
+        expect(systemMessage).toContain(customTone);
+        expect(systemMessage).toContain(appendedContent);
+        // The code_change_rules section should have been removed
+        expect(systemMessage).not.toContain("<code_change_instructions>");
+    });
+
     it("should create a session with availableTools", async () => {
         const session = await client.createSession({
             onPermissionRequest: approveAll,
@@ -460,5 +487,17 @@ describe("Send Blocking Behavior", async () => {
         await expect(
             session.sendAndWait({ prompt: "Run 'sleep 2 && echo done'" }, 100)
         ).rejects.toThrow(/Timeout after 100ms/);
+    });
+
+    it("should set model with reasoningEffort", async () => {
+        const session = await client.createSession({ onPermissionRequest: approveAll });
+
+        const modelChangePromise = getNextEventOfType(session, "session.model_change");
+
+        await session.setModel("gpt-4.1", { reasoningEffort: "high" });
+
+        const event = await modelChangePromise;
+        expect(event.data.newModel).toBe("gpt-4.1");
+        expect(event.data.reasoningEffort).toBe("high");
     });
 });

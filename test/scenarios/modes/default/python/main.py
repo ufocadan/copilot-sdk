@@ -1,6 +1,6 @@
 import asyncio
 import os
-from copilot import CopilotClient, SubprocessConfig
+from copilot import CopilotClient, PermissionHandler, SubprocessConfig
 
 
 async def main():
@@ -10,11 +10,9 @@ async def main():
     ))
 
     try:
-        session = await client.create_session({
-            "model": "claude-haiku-4.5",
-        })
+        session = await client.create_session(on_permission_request=PermissionHandler.approve_all, model="claude-haiku-4.5")
 
-        response = await session.send_and_wait({"prompt": "Use the grep tool to search for the word 'SDK' in README.md and show the matching lines."})
+        response = await session.send_and_wait("Use the grep tool to search for the word 'SDK' in README.md and show the matching lines.")
         if response:
             print(f"Response: {response.data.content}")
 

@@ -60,20 +60,22 @@ type shellExitHandlerEntry struct {
 //	})
 type Session struct {
 	// SessionID is the unique identifier for this session.
-	SessionID         string
-	workspacePath     string
-	client            *jsonrpc2.Client
-	handlers          []sessionHandler
-	nextHandlerID     uint64
-	handlerMutex      sync.RWMutex
-	toolHandlers      map[string]ToolHandler
-	toolHandlersM     sync.RWMutex
-	permissionHandler PermissionHandlerFunc
-	permissionMux     sync.RWMutex
-	userInputHandler  UserInputHandler
-	userInputMux      sync.RWMutex
-	hooks             *SessionHooks
-	hooksMux          sync.RWMutex
+	SessionID          string
+	workspacePath      string
+	client             *jsonrpc2.Client
+	handlers           []sessionHandler
+	nextHandlerID      uint64
+	handlerMutex       sync.RWMutex
+	toolHandlers       map[string]ToolHandler
+	toolHandlersM      sync.RWMutex
+	permissionHandler  PermissionHandlerFunc
+	permissionMux      sync.RWMutex
+	userInputHandler   UserInputHandler
+	userInputMux       sync.RWMutex
+	hooks              *SessionHooks
+	hooksMux           sync.RWMutex
+	transformCallbacks map[string]SectionTransformFn
+	transformMu        sync.Mutex
 
 	// eventCh serializes user event handler dispatch. dispatchEvent enqueues;
 	// a single goroutine (processEvents) dequeues and invokes handlers in FIFO order.
@@ -139,11 +141,14 @@ func newSession(sessionID string, client *jsonrpc2.Client, workspacePath string)
 //	    log.Printf("Failed to send message: %v", err)
 //	}
 func (s *Session) Send(ctx context.Context, options MessageOptions) (string, error) {
+	traceparent, tracestate := getTraceContext(ctx)
 	req := sessionSendRequest{
 		SessionID:   s.SessionID,
 		Prompt:      options.Prompt,
 		Attachments: options.Attachments,
 		Mode:        options.Mode,
+		Traceparent: traceparent,
+		Tracestate:  tracestate,
 	}
 
 	result, err := s.client.Request("session.send", req)
@@ -199,17 +204,17 @@ func (s *Session) SendAndWait(ctx context.Context, options MessageOptions) (*Ses
 
 	unsubscribe := s.On(func(event SessionEvent) {
 		switch event.Type {
-		case AssistantMessage:
+		case SessionEventTypeAssistantMessage:
 			mu.Lock()
 			eventCopy := event
 			lastAssistantMessage = &eventCopy
 			mu.Unlock()
-		case SessionIdle:
+		case SessionEventTypeSessionIdle:
 			select {
 			case idleCh <- struct{}{}:
 			default:
 			}
-		case SessionError:
+		case SessionEventTypeSessionError:
 			errMsg := "session error"
 			if event.Data.Message != nil {
 				errMsg = *event.Data.Message
@@ -531,6 +536,56 @@ func (s *Session) handleHooksInvoke(hookType string, rawInput json.RawMessage) (
 	}
 }
 
+// registerTransformCallbacks registers transform callbacks for this session.
+//
+// Transform callbacks are invoked when the CLI requests system message section
+// transforms. This method is internal and typically called when creating a session.
+func (s *Session) registerTransformCallbacks(callbacks map[string]SectionTransformFn) {
+	s.transformMu.Lock()
+	defer s.transformMu.Unlock()
+	s.transformCallbacks = callbacks
+}
+
+type systemMessageTransformSection struct {
+	Content string `json:"content"`
+}
+
+type systemMessageTransformRequest struct {
+	SessionID string                                   `json:"sessionId"`
+	Sections  map[string]systemMessageTransformSection `json:"sections"`
+}
+
+type systemMessageTransformResponse struct {
+	Sections map[string]systemMessageTransformSection `json:"sections"`
+}
+
+// handleSystemMessageTransform handles a system message transform request from the Copilot CLI.
+// This is an internal method called by the SDK when the CLI requests section transforms.
+func (s *Session) handleSystemMessageTransform(sections map[string]systemMessageTransformSection) (systemMessageTransformResponse, error) {
+	s.transformMu.Lock()
+	callbacks := s.transformCallbacks
+	s.transformMu.Unlock()
+
+	result := make(map[string]systemMessageTransformSection)
+	for sectionID, data := range sections {
+		var callback SectionTransformFn
+		if callbacks != nil {
+			callback = callbacks[sectionID]
+		}
+		if callback != nil {
+			transformed, err := callback(data.Content)
+			if err != nil {
+				result[sectionID] = systemMessageTransformSection{Content: data.Content}
+			} else {
+				result[sectionID] = systemMessageTransformSection{Content: transformed}
+			}
+		} else {
+			result[sectionID] = systemMessageTransformSection{Content: data.Content}
+		}
+	}
+	return systemMessageTransformResponse{Sections: result}, nil
+}
+
 // dispatchEvent enqueues an event for delivery to user handlers and fires
 // broadcast handlers concurrently.
 //
@@ -647,7 +702,7 @@ func (s *Session) setShellProcessCallbacks(
 // cause RPC deadlocks.
 func (s *Session) handleBroadcastEvent(event SessionEvent) {
 	switch event.Type {
-	case ExternalToolRequested:
+	case SessionEventTypeExternalToolRequested:
 		requestID := event.Data.RequestID
 		toolName := event.Data.ToolName
 		if requestID == nil || toolName == nil {
@@ -661,9 +716,16 @@ func (s *Session) handleBroadcastEvent(event SessionEvent) {
 		if event.Data.ToolCallID != nil {
 			toolCallID = *event.Data.ToolCallID
 		}
-		s.executeToolAndRespond(*requestID, *toolName, toolCallID, event.Data.Arguments, handler)
+		var tp, ts string
+		if event.Data.Traceparent != nil {
+			tp = *event.Data.Traceparent
+		}
+		if event.Data.Tracestate != nil {
+			ts = *event.Data.Tracestate
+		}
+		s.executeToolAndRespond(*requestID, *toolName, toolCallID, event.Data.Arguments, handler, tp, ts)
 
-	case PermissionRequested:
+	case SessionEventTypePermissionRequested:
 		requestID := event.Data.RequestID
 		if requestID == nil || event.Data.PermissionRequest == nil {
 			return
@@ -677,11 +739,12 @@ func (s *Session) handleBroadcastEvent(event SessionEvent) {
 }
 
 // executeToolAndRespond executes a tool handler and sends the result back via RPC.
-func (s *Session) executeToolAndRespond(requestID, toolName, toolCallID string, arguments any, handler ToolHandler) {
+func (s *Session) executeToolAndRespond(requestID, toolName, toolCallID string, arguments any, handler ToolHandler, traceparent, tracestate string) {
+	ctx := contextWithTraceParent(context.Background(), traceparent, tracestate)
 	defer func() {
 		if r := recover(); r != nil {
 			errMsg := fmt.Sprintf("tool panic: %v", r)
-			s.RPC.Tools.HandlePendingToolCall(context.Background(), &rpc.SessionToolsHandlePendingToolCallParams{
+			s.RPC.Tools.HandlePendingToolCall(ctx, &rpc.SessionToolsHandlePendingToolCallParams{
 				RequestID: requestID,
 				Error:     &errMsg,
 			})
@@ -689,16 +752,17 @@ func (s *Session) executeToolAndRespond(requestID, toolName, toolCallID string, 
 	}()
 
 	invocation := ToolInvocation{
-		SessionID:  s.SessionID,
-		ToolCallID: toolCallID,
-		ToolName:   toolName,
-		Arguments:  arguments,
+		SessionID:    s.SessionID,
+		ToolCallID:   toolCallID,
+		ToolName:     toolName,
+		Arguments:    arguments,
+		TraceContext: ctx,
 	}
 
 	result, err := handler(invocation)
 	if err != nil {
 		errMsg := err.Error()
-		s.RPC.Tools.HandlePendingToolCall(context.Background(), &rpc.SessionToolsHandlePendingToolCallParams{
+		s.RPC.Tools.HandlePendingToolCall(ctx, &rpc.SessionToolsHandlePendingToolCallParams{
 			RequestID: requestID,
 			Error:     &errMsg,
 		})
@@ -709,7 +773,7 @@ func (s *Session) executeToolAndRespond(requestID, toolName, toolCallID string, 
 	if resultStr == "" {
 		resultStr = fmt.Sprintf("%v", result)
 	}
-	s.RPC.Tools.HandlePendingToolCall(context.Background(), &rpc.SessionToolsHandlePendingToolCallParams{
+	s.RPC.Tools.HandlePendingToolCall(ctx, &rpc.SessionToolsHandlePendingToolCallParams{
 		RequestID: requestID,
 		Result:    &rpc.ResultUnion{String: &resultStr},
 	})
@@ -722,7 +786,7 @@ func (s *Session) executePermissionAndRespond(requestID string, permissionReques
 			s.RPC.Permissions.HandlePendingPermissionRequest(context.Background(), &rpc.SessionPermissionsHandlePendingPermissionRequestParams{
 				RequestID: requestID,
 				Result: rpc.SessionPermissionsHandlePendingPermissionRequestParamsResult{
-					Kind: rpc.DeniedNoApprovalRuleAndCouldNotRequestFromUser,
+					Kind: rpc.KindDeniedNoApprovalRuleAndCouldNotRequestFromUser,
 				},
 			})
 		}
@@ -737,7 +801,7 @@ func (s *Session) executePermissionAndRespond(requestID string, permissionReques
 		s.RPC.Permissions.HandlePendingPermissionRequest(context.Background(), &rpc.SessionPermissionsHandlePendingPermissionRequestParams{
 			RequestID: requestID,
 			Result: rpc.SessionPermissionsHandlePendingPermissionRequestParamsResult{
-				Kind: rpc.DeniedNoApprovalRuleAndCouldNotRequestFromUser,
+				Kind: rpc.KindDeniedNoApprovalRuleAndCouldNotRequestFromUser,
 			},
 		})
 		return
@@ -888,6 +952,12 @@ func (s *Session) Abort(ctx context.Context) error {
 	return nil
 }
 
+// SetModelOptions configures optional parameters for SetModel.
+type SetModelOptions struct {
+	// ReasoningEffort sets the reasoning effort level for the new model (e.g., "low", "medium", "high", "xhigh").
+	ReasoningEffort string
+}
+
 // SetModel changes the model for this session.
 // The new model takes effect for the next message. Conversation history is preserved.
 //
@@ -896,8 +966,16 @@ func (s *Session) Abort(ctx context.Context) error {
 //	if err := session.SetModel(context.Background(), "gpt-4.1"); err != nil {
 //	    log.Printf("Failed to set model: %v", err)
 //	}
-func (s *Session) SetModel(ctx context.Context, model string) error {
-	_, err := s.RPC.Model.SwitchTo(ctx, &rpc.SessionModelSwitchToParams{ModelID: model})
+//	if err := session.SetModel(context.Background(), "claude-sonnet-4.6", SetModelOptions{ReasoningEffort: "high"}); err != nil {
+//	    log.Printf("Failed to set model: %v", err)
+//	}
+func (s *Session) SetModel(ctx context.Context, model string, opts ...SetModelOptions) error {
+	params := &rpc.SessionModelSwitchToParams{ModelID: model}
+	if len(opts) > 0 && opts[0].ReasoningEffort != "" {
+		re := opts[0].ReasoningEffort
+		params.ReasoningEffort = &re
+	}
+	_, err := s.RPC.Model.SwitchTo(ctx, params)
 	if err != nil {
 		return fmt.Errorf("failed to set model: %w", err)
 	}
@@ -907,8 +985,8 @@ func (s *Session) SetModel(ctx context.Context, model string) error {
 
 // LogOptions configures optional parameters for [Session.Log].
 type LogOptions struct {
-	// Level sets the log severity. Valid values are [rpc.Info] (default),
-	// [rpc.Warning], and [rpc.Error].
+	// Level sets the log severity. Valid values are [rpc.LevelInfo] (default),
+	// [rpc.LevelWarning], and [rpc.LevelError].
 	Level rpc.Level
 	// Ephemeral marks the message as transient so it is not persisted
 	// to the session event log on disk. When nil the server decides the
@@ -928,7 +1006,7 @@ type LogOptions struct {
 //	session.Log(ctx, "Processing started")
 //
 //	// Warning with options
-//	session.Log(ctx, "Rate limit approaching", &copilot.LogOptions{Level: rpc.Warning})
+//	session.Log(ctx, "Rate limit approaching", &copilot.LogOptions{Level: rpc.LevelWarning})
 //
 //	// Ephemeral message (not persisted)
 //	session.Log(ctx, "Working...", &copilot.LogOptions{Ephemeral: copilot.Bool(true)})

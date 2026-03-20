@@ -7,9 +7,9 @@ Python SDK for programmatic control of GitHub Copilot CLI via JSON-RPC.
 ## Installation
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[telemetry,dev]"
 # or
-uv pip install -e ".[dev]"
+uv pip install -e ".[telemetry,dev]"
 ```
 
 ## Run the Sample
@@ -25,15 +25,15 @@ python chat.py
 
 ```python
 import asyncio
-from copilot import CopilotClient
+from copilot import CopilotClient, PermissionHandler
 
 async def main():
     # Create and start client
     client = CopilotClient()
     await client.start()
 
-    # Create a session
-    session = await client.create_session({"model": "gpt-5"})
+    # Create a session (on_permission_request is required)
+    session = await client.create_session(on_permission_request=PermissionHandler.approve_all, model="gpt-5")
 
     # Wait for response using session.idle event
     done = asyncio.Event()
@@ -47,7 +47,7 @@ async def main():
     session.on(on_event)
 
     # Send a message and wait for completion
-    await session.send({"prompt": "What is 2+2?"})
+    await session.send("What is 2+2?")
     await done.wait()
 
     # Clean up
@@ -60,8 +60,8 @@ asyncio.run(main())
 Sessions also support the `async with` context manager pattern for automatic cleanup:
 
 ```python
-async with await client.create_session({"model": "gpt-5"}) as session:
-    await session.send({"prompt": "What is 2+2?"})
+async with await client.create_session(on_permission_request=PermissionHandler.approve_all, model="gpt-5") as session:
+    await session.send("What is 2+2?")
     # session is automatically disconnected when leaving the block
 ```
 
@@ -85,13 +85,13 @@ from copilot import CopilotClient, SubprocessConfig
 client = CopilotClient()  # uses bundled CLI, stdio transport
 await client.start()
 
-session = await client.create_session({"model": "gpt-5"})
+session = await client.create_session(on_permission_request=PermissionHandler.approve_all, model="gpt-5")
 
 def on_event(event):
     print(f"Event: {event['type']}")
 
 session.on(on_event)
-await session.send({"prompt": "Hello!"})
+await session.send("Hello!")
 
 # ... wait for events ...
 
@@ -128,23 +128,68 @@ CopilotClient(
 - `env` (dict | None): Environment variables for the CLI process
 - `github_token` (str | None): GitHub token for authentication. When provided, takes priority over other auth methods.
 - `use_logged_in_user` (bool | None): Whether to use logged-in user for authentication (default: True, but False when `github_token` is provided).
+- `telemetry` (dict | None): OpenTelemetry configuration for the CLI process. Providing this enables telemetry — no separate flag needed. See [Telemetry](#telemetry) below.
 
 **ExternalServerConfig** — connect to an existing CLI server:
 
 - `url` (str): Server URL (e.g., `"localhost:8080"`, `"http://127.0.0.1:9000"`, or just `"8080"`).
 
-**SessionConfig Options (for `create_session`):**
+**`create_session` Parameters:**
 
-- `model` (str): Model to use ("gpt-5", "claude-sonnet-4.5", etc.). **Required when using custom provider.**
+All parameters are keyword-only:
+
+- `on_permission_request` (callable): **Required.** Handler called before each tool execution to approve or deny it. Use `PermissionHandler.approve_all` to allow everything, or provide a custom function for fine-grained control. See [Permission Handling](#permission-handling) section.
+- `model` (str): Model to use ("gpt-5", "claude-sonnet-4.5", etc.).
+- `session_id` (str): Custom session ID for resuming or identifying sessions.
+- `client_name` (str): Client name to identify the application using the SDK. Included in the User-Agent header for API requests.
 - `reasoning_effort` (str): Reasoning effort level for models that support it ("low", "medium", "high", "xhigh"). Use `list_models()` to check which models support this option.
-- `session_id` (str): Custom session ID
-- `tools` (list): Custom tools exposed to the CLI
-- `system_message` (dict): System message configuration
-- `streaming` (bool): Enable streaming delta events
-- `provider` (dict): Custom API provider configuration (BYOK). See [Custom Providers](#custom-providers) section.
-- `infinite_sessions` (dict): Automatic context compaction configuration
+- `tools` (list): Custom tools exposed to the CLI.
+- `system_message` (dict): System message configuration. Supports three modes:
+  - **append** (default): Appends `content` after the SDK-managed prompt
+  - **replace**: Replaces the entire prompt with `content`
+  - **customize**: Selectively override individual sections via `sections` dict (keys: `"identity"`, `"tone"`, `"tool_efficiency"`, `"environment_context"`, `"code_change_rules"`, `"guidelines"`, `"safety"`, `"tool_instructions"`, `"custom_instructions"`, `"last_instructions"`; values: `SectionOverride` with `action` and optional `content`)
+- `available_tools` (list[str]): List of tool names to allow. Takes precedence over `excluded_tools`.
+- `excluded_tools` (list[str]): List of tool names to disable. Ignored if `available_tools` is set.
 - `on_user_input_request` (callable): Handler for user input requests from the agent (enables ask_user tool). See [User Input Requests](#user-input-requests) section.
 - `hooks` (dict): Hook handlers for session lifecycle events. See [Session Hooks](#session-hooks) section.
+- `working_directory` (str): Working directory for the session. Tool operations will be relative to this directory.
+- `provider` (dict): Custom API provider configuration (BYOK). See [Custom Providers](#custom-providers) section.
+- `streaming` (bool): Enable streaming delta events.
+- `mcp_servers` (dict): MCP server configurations for the session.
+- `custom_agents` (list): Custom agent configurations for the session.
+- `config_dir` (str): Override the default configuration directory location.
+- `skill_directories` (list[str]): Directories to load skills from.
+- `disabled_skills` (list[str]): List of skill names to disable.
+- `infinite_sessions` (dict): Automatic context compaction configuration.
+
+**`resume_session` Parameters:**
+
+- `session_id` (str): **Required.** The ID of the session to resume.
+
+The parameters below are keyword-only:
+
+- `on_permission_request` (callable): **Required.** Handler called before each tool execution to approve or deny it. Use `PermissionHandler.approve_all` to allow everything, or provide a custom function for fine-grained control. See [Permission Handling](#permission-handling) section.
+- `model` (str): Model to use (can change the model when resuming).
+- `client_name` (str): Client name to identify the application using the SDK.
+- `reasoning_effort` (str): Reasoning effort level ("low", "medium", "high", "xhigh").
+- `tools` (list): Custom tools exposed to the CLI.
+- `system_message` (dict): System message configuration.
+- `available_tools` (list[str]): List of tool names to allow. Takes precedence over `excluded_tools`.
+- `excluded_tools` (list[str]): List of tool names to disable. Ignored if `available_tools` is set.
+- `on_user_input_request` (callable): Handler for user input requests from the agent (enables ask_user tool).
+- `hooks` (dict): Hook handlers for session lifecycle events.
+- `working_directory` (str): Working directory for the session.
+- `provider` (dict): Custom API provider configuration (BYOK).
+- `streaming` (bool): Enable streaming delta events.
+- `mcp_servers` (dict): MCP server configurations for the session.
+- `custom_agents` (list): Custom agent configurations for the session.
+- `agent` (str): Name of the custom agent to activate when the session starts.
+- `config_dir` (str): Override the default configuration directory location.
+- `skill_directories` (list[str]): Directories to load skills from.
+- `disabled_skills` (list[str]): List of skill names to disable.
+- `infinite_sessions` (dict): Automatic context compaction configuration.
+- `disable_resume` (bool): Skip emitting the session.resume event (default: False).
+- `on_event` (callable): Event handler registered before the session.resume RPC.
 
 **Session Lifecycle Methods:**
 
@@ -175,13 +220,61 @@ unsubscribe()
 - `session.foreground` - A session became the foreground session in TUI
 - `session.background` - A session is no longer the foreground session
 
+### System Message Customization
+
+Control the system prompt using `system_message` in session config:
+
+```python
+session = await client.create_session(
+    system_message={
+        "content": "Always check for security vulnerabilities before suggesting changes."
+    }
+)
+```
+
+The SDK auto-injects environment context, tool instructions, and security guardrails. The default CLI persona is preserved, and your `content` is appended after SDK-managed sections. To change the persona or fully redefine the prompt, use `mode: "replace"` or `mode: "customize"`.
+
+#### Customize Mode
+
+Use `mode: "customize"` to selectively override individual sections of the prompt while preserving the rest:
+
+```python
+from copilot import SYSTEM_PROMPT_SECTIONS
+
+session = await client.create_session(
+    system_message={
+        "mode": "customize",
+        "sections": {
+            # Replace the tone/style section
+            "tone": {"action": "replace", "content": "Respond in a warm, professional tone. Be thorough in explanations."},
+            # Remove coding-specific rules
+            "code_change_rules": {"action": "remove"},
+            # Append to existing guidelines
+            "guidelines": {"action": "append", "content": "\n* Always cite data sources"},
+        },
+        # Additional instructions appended after all sections
+        "content": "Focus on financial analysis and reporting.",
+    }
+)
+```
+
+Available section IDs: `"identity"`, `"tone"`, `"tool_efficiency"`, `"environment_context"`, `"code_change_rules"`, `"guidelines"`, `"safety"`, `"tool_instructions"`, `"custom_instructions"`, `"last_instructions"`. Use the `SYSTEM_PROMPT_SECTIONS` dict for descriptions of each section.
+
+Each section override supports four actions:
+- **`replace`** — Replace the section content entirely
+- **`remove`** — Remove the section from the prompt
+- **`append`** — Add content after the existing section
+- **`prepend`** — Add content before the existing section
+
+Unknown section IDs are handled gracefully: content from `replace`/`append`/`prepend` overrides is appended to additional instructions, and `remove` overrides are silently ignored.
+
 ### Tools
 
 Define tools with automatic JSON schema generation using the `@define_tool` decorator and Pydantic models:
 
 ```python
 from pydantic import BaseModel, Field
-from copilot import CopilotClient, define_tool
+from copilot import CopilotClient, define_tool, PermissionHandler
 
 class LookupIssueParams(BaseModel):
     id: str = Field(description="Issue identifier")
@@ -191,10 +284,11 @@ async def lookup_issue(params: LookupIssueParams) -> str:
     issue = await fetch_issue(params.id)
     return issue.summary
 
-session = await client.create_session({
-    "model": "gpt-5",
-    "tools": [lookup_issue],
-})
+session = await client.create_session(
+    on_permission_request=PermissionHandler.approve_all,
+    model="gpt-5",
+    tools=[lookup_issue],
+)
 ```
 
 > **Note:** When using `from __future__ import annotations`, define Pydantic models at module level (not inside functions).
@@ -204,7 +298,7 @@ session = await client.create_session({
 For users who prefer manual schema definition:
 
 ```python
-from copilot import CopilotClient, Tool
+from copilot import CopilotClient, Tool, PermissionHandler
 
 async def lookup_issue(invocation):
     issue_id = invocation["arguments"]["id"]
@@ -215,9 +309,10 @@ async def lookup_issue(invocation):
         "sessionLog": f"Fetched issue {issue_id}",
     }
 
-session = await client.create_session({
-    "model": "gpt-5",
-    "tools": [
+session = await client.create_session(
+    on_permission_request=PermissionHandler.approve_all,
+    model="gpt-5",
+    tools=[
         Tool(
             name="lookup_issue",
             description="Fetch issue details from our tracker",
@@ -231,7 +326,7 @@ session = await client.create_session({
             handler=lookup_issue,
         )
     ],
-})
+)
 ```
 
 The SDK automatically handles `tool.call`, executes your handler (sync or async), and responds with the final result when the tool completes.
@@ -262,24 +357,37 @@ async def safe_lookup(params: LookupParams) -> str:
 
 ## Image Support
 
-The SDK supports image attachments via the `attachments` parameter. You can attach images by providing their file path:
+The SDK supports image attachments via the `attachments` parameter. You can attach images by providing their file path, or by passing base64-encoded data directly using a blob attachment:
 
 ```python
-await session.send({
-    "prompt": "What's in this image?",
-    "attachments": [
+# File attachment — runtime reads from disk
+await session.send(
+    "What's in this image?",
+    attachments=[
         {
             "type": "file",
             "path": "/path/to/image.jpg",
         }
-    ]
-})
+    ],
+)
+
+# Blob attachment — provide base64 data directly
+await session.send(
+    "What's in this image?",
+    attachments=[
+        {
+            "type": "blob",
+            "data": base64_image_data,
+            "mimeType": "image/png",
+        }
+    ],
+)
 ```
 
 Supported image formats include JPG, PNG, GIF, and other common image types. The agent's `view` tool can also read images directly from the filesystem, so you can also ask questions like:
 
 ```python
-await session.send({"prompt": "What does the most recent jpg in this directory portray?"})
+await session.send("What does the most recent jpg in this directory portray?")
 ```
 
 ## Streaming
@@ -288,16 +396,17 @@ Enable streaming to receive assistant response chunks as they're generated:
 
 ```python
 import asyncio
-from copilot import CopilotClient
+from copilot import CopilotClient, PermissionHandler
 
 async def main():
     client = CopilotClient()
     await client.start()
 
-    session = await client.create_session({
-        "model": "gpt-5",
-        "streaming": True
-    })
+    session = await client.create_session(
+        on_permission_request=PermissionHandler.approve_all,
+        model="gpt-5",
+        streaming=True,
+    )
 
     # Use asyncio.Event to wait for completion
     done = asyncio.Event()
@@ -324,7 +433,7 @@ async def main():
             done.set()
 
     session.on(on_event)
-    await session.send({"prompt": "Tell me a short story"})
+    await session.send("Tell me a short story")
     await done.wait()  # Wait for streaming to complete
 
     await session.disconnect()
@@ -348,27 +457,29 @@ By default, sessions use **infinite sessions** which automatically manage contex
 
 ```python
 # Default: infinite sessions enabled with default thresholds
-session = await client.create_session({"model": "gpt-5"})
+session = await client.create_session(on_permission_request=PermissionHandler.approve_all, model="gpt-5")
 
 # Access the workspace path for checkpoints and files
 print(session.workspace_path)
 # => ~/.copilot/session-state/{session_id}/
 
 # Custom thresholds
-session = await client.create_session({
-    "model": "gpt-5",
-    "infinite_sessions": {
+session = await client.create_session(
+    on_permission_request=PermissionHandler.approve_all,
+    model="gpt-5",
+    infinite_sessions={
         "enabled": True,
         "background_compaction_threshold": 0.80,  # Start compacting at 80% context usage
         "buffer_exhaustion_threshold": 0.95,  # Block at 95% until compaction completes
     },
-})
+)
 
 # Disable infinite sessions
-session = await client.create_session({
-    "model": "gpt-5",
-    "infinite_sessions": {"enabled": False},
-})
+session = await client.create_session(
+    on_permission_request=PermissionHandler.approve_all,
+    model="gpt-5",
+    infinite_sessions={"enabled": False},
+)
 ```
 
 When enabled, sessions emit compaction events:
@@ -392,16 +503,17 @@ The SDK supports custom OpenAI-compatible API providers (BYOK - Bring Your Own K
 **Example with Ollama:**
 
 ```python
-session = await client.create_session({
-    "model": "deepseek-coder-v2:16b",  # Required when using custom provider
-    "provider": {
+session = await client.create_session(
+    on_permission_request=PermissionHandler.approve_all,
+    model="deepseek-coder-v2:16b",  # Model to use with the custom provider
+    provider={
         "type": "openai",
         "base_url": "http://localhost:11434/v1",  # Ollama endpoint
         # api_key not required for Ollama
     },
-})
+)
 
-await session.send({"prompt": "Hello!"})
+await session.send("Hello!")
 ```
 
 **Example with custom OpenAI-compatible API:**
@@ -409,14 +521,15 @@ await session.send({"prompt": "Hello!"})
 ```python
 import os
 
-session = await client.create_session({
-    "model": "gpt-4",
-    "provider": {
+session = await client.create_session(
+    on_permission_request=PermissionHandler.approve_all,
+    model="gpt-4",
+    provider={
         "type": "openai",
         "base_url": "https://my-api.example.com/v1",
         "api_key": os.environ["MY_API_KEY"],
     },
-})
+)
 ```
 
 **Example with Azure OpenAI:**
@@ -424,9 +537,10 @@ session = await client.create_session({
 ```python
 import os
 
-session = await client.create_session({
-    "model": "gpt-4",
-    "provider": {
+session = await client.create_session(
+    on_permission_request=PermissionHandler.approve_all,
+    model="gpt-4",
+    provider={
         "type": "azure",  # Must be "azure" for Azure endpoints, NOT "openai"
         "base_url": "https://my-resource.openai.azure.com",  # Just the host, no path
         "api_key": os.environ["AZURE_OPENAI_KEY"],
@@ -434,13 +548,123 @@ session = await client.create_session({
             "api_version": "2024-10-21",
         },
     },
-})
+)
 ```
 
 > **Important notes:**
-> - When using a custom provider, the `model` parameter is **required**. The SDK will throw an error if no model is specified.
 > - For Azure OpenAI endpoints (`*.openai.azure.com`), you **must** use `type: "azure"`, not `type: "openai"`.
 > - The `base_url` should be just the host (e.g., `https://my-resource.openai.azure.com`). Do **not** include `/openai/v1` in the URL - the SDK handles path construction automatically.
+
+## Telemetry
+
+The SDK supports OpenTelemetry for distributed tracing. Provide a `telemetry` config to enable trace export and automatic W3C Trace Context propagation.
+
+```python
+from copilot import CopilotClient, SubprocessConfig
+
+client = CopilotClient(SubprocessConfig(
+    telemetry={
+        "otlp_endpoint": "http://localhost:4318",
+    },
+))
+```
+
+**TelemetryConfig options:**
+
+- `otlp_endpoint` (str): OTLP HTTP endpoint URL
+- `file_path` (str): File path for JSON-lines trace output
+- `exporter_type` (str): `"otlp-http"` or `"file"`
+- `source_name` (str): Instrumentation scope name
+- `capture_content` (bool): Whether to capture message content
+
+Trace context (`traceparent`/`tracestate`) is automatically propagated between the SDK and CLI on `create_session`, `resume_session`, and `send` calls, and inbound when the CLI invokes tool handlers.
+
+Install with telemetry extras: `pip install copilot-sdk[telemetry]` (provides `opentelemetry-api`)
+
+## Permission Handling
+
+An `on_permission_request` handler is **required** whenever you create or resume a session. The handler is called before the agent executes each tool (file writes, shell commands, custom tools, etc.) and must return a decision.
+
+### Approve All (simplest)
+
+Use the built-in `PermissionHandler.approve_all` helper to allow every tool call without any checks:
+
+```python
+from copilot import CopilotClient, PermissionHandler
+
+session = await client.create_session({
+    "model": "gpt-5",
+    "on_permission_request": PermissionHandler.approve_all,
+})
+```
+
+### Custom Permission Handler
+
+Provide your own function to inspect each request and apply custom logic (sync or async):
+
+```python
+from copilot import PermissionRequest, PermissionRequestResult
+
+def on_permission_request(request: PermissionRequest, invocation: dict) -> PermissionRequestResult:
+    # request.kind — what type of operation is being requested:
+    #   "shell"       — executing a shell command
+    #   "write"       — writing or editing a file
+    #   "read"        — reading a file
+    #   "mcp"         — calling an MCP tool
+    #   "custom-tool" — calling one of your registered tools
+    #   "url"         — fetching a URL
+    #   "memory"      — accessing or updating session/workspace memory
+    #   "hook"        — invoking a registered hook
+    # request.tool_call_id  — the tool call that triggered this request
+    # request.tool_name     — name of the tool (for custom-tool / mcp)
+    # request.file_name     — file being written (for write)
+    # request.full_command_text — full shell command (for shell)
+
+    if request.kind.value == "shell":
+        # Deny shell commands
+        return PermissionRequestResult(kind="denied-interactively-by-user")
+
+    return PermissionRequestResult(kind="approved")
+
+session = await client.create_session({
+    "model": "gpt-5",
+    "on_permission_request": on_permission_request,
+})
+```
+
+Async handlers are also supported:
+
+```python
+async def on_permission_request(request: PermissionRequest, invocation: dict) -> PermissionRequestResult:
+    # Simulate an async approval check (e.g., prompting a user over a network)
+    await asyncio.sleep(0)
+    return PermissionRequestResult(kind="approved")
+```
+
+### Permission Result Kinds
+
+| `kind` value | Meaning |
+|---|---------|
+| `"approved"` | Allow the tool to run |
+| `"denied-interactively-by-user"` | User explicitly denied the request |
+| `"denied-no-approval-rule-and-could-not-request-from-user"` | No approval rule matched and user could not be asked (default when no kind is specified) |
+| `"denied-by-rules"` | Denied by a policy rule |
+| `"denied-by-content-exclusion-policy"` | Denied due to a content exclusion policy |
+| `"no-result"` | Leave the request unanswered (not allowed for protocol v2 permission requests) |
+
+### Resuming Sessions
+
+Pass `on_permission_request` when resuming a session too — it is required:
+
+```python
+session = await client.resume_session("session-id", {
+    "on_permission_request": PermissionHandler.approve_all,
+})
+```
+
+### Per-Tool Skip Permission
+
+To let a specific custom tool bypass the permission prompt entirely, set `skip_permission=True` on the tool definition. See [Skipping Permission Prompts](#skipping-permission-prompts) under Tools.
 
 ## User Input Requests
 
@@ -462,10 +686,11 @@ async def handle_user_input(request, invocation):
         "wasFreeform": True,  # Whether the answer was freeform (not from choices)
     }
 
-session = await client.create_session({
-    "model": "gpt-5",
-    "on_user_input_request": handle_user_input,
-})
+session = await client.create_session(
+    on_permission_request=PermissionHandler.approve_all,
+    model="gpt-5",
+    on_user_input_request=handle_user_input,
+)
 ```
 
 ## Session Hooks
@@ -509,9 +734,10 @@ async def on_error_occurred(input, invocation):
         "errorHandling": "retry",  # "retry", "skip", or "abort"
     }
 
-session = await client.create_session({
-    "model": "gpt-5",
-    "hooks": {
+session = await client.create_session(
+    on_permission_request=PermissionHandler.approve_all,
+    model="gpt-5",
+    hooks={
         "on_pre_tool_use": on_pre_tool_use,
         "on_post_tool_use": on_post_tool_use,
         "on_user_prompt_submitted": on_user_prompt_submitted,
@@ -519,7 +745,7 @@ session = await client.create_session({
         "on_session_end": on_session_end,
         "on_error_occurred": on_error_occurred,
     },
-})
+)
 ```
 
 **Available hooks:**

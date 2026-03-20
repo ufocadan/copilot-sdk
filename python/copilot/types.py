@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import KW_ONLY, dataclass, field
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, Required, TypedDict
 
 # Import generated SessionEvent types
 from .generated.session_events import (
@@ -65,8 +65,35 @@ class SelectionAttachment(TypedDict):
     text: NotRequired[str]
 
 
+class BlobAttachment(TypedDict):
+    """Inline base64-encoded content attachment (e.g. images)."""
+
+    type: Literal["blob"]
+    data: str
+    """Base64-encoded content"""
+    mimeType: str
+    """MIME type of the inline data"""
+    displayName: NotRequired[str]
+
+
 # Attachment type - union of all attachment types
-Attachment = FileAttachment | DirectoryAttachment | SelectionAttachment
+Attachment = FileAttachment | DirectoryAttachment | SelectionAttachment | BlobAttachment
+
+
+# Configuration for OpenTelemetry integration with the Copilot CLI.
+class TelemetryConfig(TypedDict, total=False):
+    """Configuration for OpenTelemetry integration with the Copilot CLI."""
+
+    otlp_endpoint: str
+    """OTLP HTTP endpoint URL for trace/metric export. Sets OTEL_EXPORTER_OTLP_ENDPOINT."""
+    file_path: str
+    """File path for JSON-lines trace output. Sets COPILOT_OTEL_FILE_EXPORTER_PATH."""
+    exporter_type: str
+    """Exporter backend type: "otlp-http" or "file". Sets COPILOT_OTEL_EXPORTER_TYPE."""
+    source_name: str
+    """Instrumentation scope name. Sets COPILOT_OTEL_SOURCE_NAME."""
+    capture_content: bool
+    """Whether to capture message content. Sets OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT."""  # noqa: E501
 
 
 # Configuration for CopilotClient connection modes
@@ -119,6 +146,9 @@ class SubprocessConfig:
 
     ``None`` (default) resolves to ``True`` unless ``github_token`` is set.
     """
+
+    telemetry: TelemetryConfig | None = None
+    """OpenTelemetry configuration. Providing this enables telemetry — no separate flag needed."""
 
 
 @dataclass
@@ -183,7 +213,52 @@ class Tool:
 
 
 # System message configuration (discriminated union)
-# Use SystemMessageAppendConfig for default behavior, SystemMessageReplaceConfig for full control
+# Use SystemMessageAppendConfig for default behavior,
+# SystemMessageReplaceConfig for full control,
+# or SystemMessageCustomizeConfig for section-level overrides.
+
+# Known system prompt section identifiers for the "customize" mode.
+SystemPromptSection = Literal[
+    "identity",
+    "tone",
+    "tool_efficiency",
+    "environment_context",
+    "code_change_rules",
+    "guidelines",
+    "safety",
+    "tool_instructions",
+    "custom_instructions",
+    "last_instructions",
+]
+
+SYSTEM_PROMPT_SECTIONS: dict[SystemPromptSection, str] = {
+    "identity": "Agent identity preamble and mode statement",
+    "tone": "Response style, conciseness rules, output formatting preferences",
+    "tool_efficiency": "Tool usage patterns, parallel calling, batching guidelines",
+    "environment_context": "CWD, OS, git root, directory listing, available tools",
+    "code_change_rules": "Coding rules, linting/testing, ecosystem tools, style",
+    "guidelines": "Tips, behavioral best practices, behavioral guidelines",
+    "safety": "Environment limitations, prohibited actions, security policies",
+    "tool_instructions": "Per-tool usage instructions",
+    "custom_instructions": "Repository and organization custom instructions",
+    "last_instructions": (
+        "End-of-prompt instructions: parallel tool calling, persistence, task completion"
+    ),
+}
+
+
+SectionTransformFn = Callable[[str], str | Awaitable[str]]
+"""Transform callback: receives current section content, returns new content."""
+
+SectionOverrideAction = Literal["replace", "remove", "append", "prepend"] | SectionTransformFn
+"""Override action: a string literal for static overrides, or a callback for transforms."""
+
+
+class SectionOverride(TypedDict, total=False):
+    """Override operation for a single system prompt section."""
+
+    action: Required[SectionOverrideAction]
+    content: NotRequired[str]
 
 
 class SystemMessageAppendConfig(TypedDict, total=False):
@@ -205,8 +280,21 @@ class SystemMessageReplaceConfig(TypedDict):
     content: str
 
 
-# Union type - use one or the other
-SystemMessageConfig = SystemMessageAppendConfig | SystemMessageReplaceConfig
+class SystemMessageCustomizeConfig(TypedDict, total=False):
+    """
+    Customize mode: Override individual sections of the system prompt.
+    Keeps the SDK-managed prompt structure while allowing targeted modifications.
+    """
+
+    mode: Required[Literal["customize"]]
+    sections: NotRequired[dict[SystemPromptSection, SectionOverride]]
+    content: NotRequired[str]
+
+
+# Union type - use one based on your needs
+SystemMessageConfig = (
+    SystemMessageAppendConfig | SystemMessageReplaceConfig | SystemMessageCustomizeConfig
+)
 
 
 # Permission result types
@@ -507,63 +595,7 @@ class InfiniteSessionConfig(TypedDict, total=False):
     buffer_exhaustion_threshold: float
 
 
-# Configuration for creating a session
-class SessionConfig(TypedDict, total=False):
-    """Configuration for creating a session"""
-
-    session_id: str  # Optional custom session ID
-    # Client name to identify the application using the SDK.
-    # Included in the User-Agent header for API requests.
-    client_name: str
-    model: str  # Model to use for this session. Use client.list_models() to see available models.
-    # Reasoning effort level for models that support it.
-    # Only valid for models where capabilities.supports.reasoning_effort is True.
-    reasoning_effort: ReasoningEffort
-    tools: list[Tool]
-    system_message: SystemMessageConfig  # System message configuration
-    # List of tool names to allow (takes precedence over excluded_tools)
-    available_tools: list[str]
-    # List of tool names to disable (ignored if available_tools is set)
-    excluded_tools: list[str]
-    # Handler for permission requests from the server
-    on_permission_request: _PermissionHandlerFn
-    # Handler for user input requests from the agent (enables ask_user tool)
-    on_user_input_request: UserInputHandler
-    # Hook handlers for intercepting session lifecycle events
-    hooks: SessionHooks
-    # Working directory for the session. Tool operations will be relative to this directory.
-    working_directory: str
-    # Custom provider configuration (BYOK - Bring Your Own Key)
-    provider: ProviderConfig
-    # Enable streaming of assistant message and reasoning chunks
-    # When True, assistant.message_delta and assistant.reasoning_delta events
-    # with delta_content are sent as the response is generated
-    streaming: bool
-    # MCP server configurations for the session
-    mcp_servers: dict[str, MCPServerConfig]
-    # Custom agent configurations for the session
-    custom_agents: list[CustomAgentConfig]
-    # Name of the custom agent to activate when the session starts.
-    # Must match the name of one of the agents in custom_agents.
-    agent: str
-    # Override the default configuration directory location.
-    # When specified, the session will use this directory for storing config and state.
-    config_dir: str
-    # Directories to load skills from
-    skill_directories: list[str]
-    # List of skill names to disable
-    disabled_skills: list[str]
-    # Infinite session configuration for persistent workspaces and automatic compaction.
-    # When enabled (default), sessions automatically manage context limits and persist state.
-    # Set to {"enabled": False} to disable.
-    infinite_sessions: InfiniteSessionConfig
-    # Optional event handler that is registered on the session before the
-    # session.create RPC is issued, ensuring early events (e.g. session.start)
-    # are delivered. Equivalent to calling session.on(handler) immediately
-    # after creation, but executes earlier in the lifecycle so no events are missed.
-    on_event: Callable[[SessionEvent], None]
-
-
+# Azure-specific provider options
 class AzureProviderOptions(TypedDict, total=False):
     """Azure-specific provider configuration"""
 
@@ -583,67 +615,6 @@ class ProviderConfig(TypedDict, total=False):
     # Takes precedence over api_key when both are set.
     bearer_token: str
     azure: AzureProviderOptions  # Azure-specific options
-
-
-# Configuration for resuming a session
-class ResumeSessionConfig(TypedDict, total=False):
-    """Configuration for resuming a session"""
-
-    # Client name to identify the application using the SDK.
-    # Included in the User-Agent header for API requests.
-    client_name: str
-    # Model to use for this session. Can change the model when resuming.
-    model: str
-    tools: list[Tool]
-    system_message: SystemMessageConfig  # System message configuration
-    # List of tool names to allow (takes precedence over excluded_tools)
-    available_tools: list[str]
-    # List of tool names to disable (ignored if available_tools is set)
-    excluded_tools: list[str]
-    provider: ProviderConfig
-    # Reasoning effort level for models that support it.
-    reasoning_effort: ReasoningEffort
-    on_permission_request: _PermissionHandlerFn
-    # Handler for user input requestsfrom the agent (enables ask_user tool)
-    on_user_input_request: UserInputHandler
-    # Hook handlers for intercepting session lifecycle events
-    hooks: SessionHooks
-    # Working directory for the session. Tool operations will be relative to this directory.
-    working_directory: str
-    # Override the default configuration directory location.
-    config_dir: str
-    # Enable streaming of assistant message chunks
-    streaming: bool
-    # MCP server configurations for the session
-    mcp_servers: dict[str, MCPServerConfig]
-    # Custom agent configurations for the session
-    custom_agents: list[CustomAgentConfig]
-    # Name of the custom agent to activate when the session starts.
-    # Must match the name of one of the agents in custom_agents.
-    agent: str
-    # Directories to load skills from
-    skill_directories: list[str]
-    # List of skill names to disable
-    disabled_skills: list[str]
-    # Infinite session configuration for persistent workspaces and automatic compaction.
-    infinite_sessions: InfiniteSessionConfig
-    # When True, skips emitting the session.resume event.
-    # Useful for reconnecting to a session without triggering resume-related side effects.
-    disable_resume: bool
-    # Optional event handler registered before the session.resume RPC is issued,
-    # ensuring early events are delivered. See SessionConfig.on_event.
-    on_event: Callable[[SessionEvent], None]
-
-
-# Options for sending a message to a session
-class MessageOptions(TypedDict):
-    """Options for sending a message to a session"""
-
-    prompt: str  # The prompt/message to send
-    # Optional file/directory attachments
-    attachments: NotRequired[list[Attachment]]
-    # Message processing mode
-    mode: NotRequired[Literal["enqueue", "immediate"]]
 
 
 # Event handler type

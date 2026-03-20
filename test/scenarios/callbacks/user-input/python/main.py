@@ -1,6 +1,6 @@
 import asyncio
 import os
-from copilot import CopilotClient, SubprocessConfig
+from copilot import CopilotClient, PermissionHandler, SubprocessConfig
 
 
 input_log: list[str] = []
@@ -27,21 +27,15 @@ async def main():
 
     try:
         session = await client.create_session(
-            {
-                "model": "claude-haiku-4.5",
-                "on_permission_request": auto_approve_permission,
-                "on_user_input_request": handle_user_input,
-                "hooks": {"on_pre_tool_use": auto_approve_tool},
-            }
+            on_permission_request=auto_approve_permission,
+            model="claude-haiku-4.5",
+            on_user_input_request=handle_user_input,
+            hooks={"on_pre_tool_use": auto_approve_tool},
         )
 
         response = await session.send_and_wait(
-            {
-                "prompt": (
-                    "I want to learn about a city. Use the ask_user tool to ask me "
-                    "which city I'm interested in. Then tell me about that city."
-                )
-            }
+            "I want to learn about a city. Use the ask_user tool to ask me "
+            "which city I'm interested in. Then tell me about that city."
         )
 
         if response:
