@@ -1,0 +1,135 @@
+name: Collect triage agent corrections
+
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: collect-corrections
+  cancel-in-progress: false
+
+permissions:
+  issues: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    if: >-
+      contains(github.event.comment.body, '<!-- triage-agent:') &&
+      (
+        github.event.comment.author_association == 'MEMBER' ||
+        github.event.comment.author_association == 'COLLABORATOR' ||
+        github.event.comment.author_association == 'OWNER'
+      )
+    steps:
+      - name: Add correction label to the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "triage-agent-correction"
+
+      - name: Find or create tracking issue
+        id: tracking
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Search for an open tracking issue without copilot assigned
+          TRACKING_ISSUE=$(gh issue list \
+            --repo "$REPO" \
+            --label "triage-agent-tracking" \
+            --state open \
+            --json number,assignees \
+            --jq '[.[] | select(.assignees | map(.login) | index("copilot") == null)] | sort_by(.number) | last | .number // empty')
+
+          if [ -z "$TRACKING_ISSUE" ]; then
+            echo "No available tracking issue found, creating one..."
+            BODY=$(cat <<'EOF'
+          # Triage Agent Corrections
+
+          This issue tracks corrections to the triage agent system. When assigned to
+          Copilot, analyze the corrections and generate an improvement PR.
+
+          ## Instructions for Copilot
+
+          When assigned:
+          1. Read each linked correction comment and the original issue for full context
+          2. Identify patterns (e.g., the classifier frequently confuses X with Y)
+          3. Determine which workflow file(s) need improvement
+          4. Use the `agentic-workflows` agent in this repo for guidance on workflow syntax and conventions
+          5. Open a PR with targeted changes to the relevant `.md` workflow files in `.github/workflows/`
+          6. Reference this issue in the PR description using `Closes #<this issue number>`
+          7. Include a summary of which corrections motivated each change
+
+          ## Corrections
+
+          | # | Issue | Correction | Date |
+          |---|-------|------------|------|
+          EOF
+            )
+            TRACKING_ISSUE=$(gh issue create \
+              --repo "$REPO" \
+              --title "Triage Agent Corrections" \
+              --label "triage-agent-tracking" \
+              --body "$BODY" \
+              --json number --jq '.number')
+            echo "Created tracking issue #$TRACKING_ISSUE"
+          fi
+
+          echo "tracking_issue=$TRACKING_ISSUE" >> "$GITHUB_OUTPUT"
+
+      - name: Append correction to tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TRACKING_ISSUE: ${{ steps.tracking.outputs.tracking_issue }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          COMMENT_URL: ${{ github.event.comment.html_url }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          # Extract the triage-agent correction text from the HTML comment
+          CORRECTION_TEXT=$(echo "$COMMENT_BODY" | grep -oP '<!-- triage-agent:\s*\K.*?(?=\s*-->)' || echo "(see comment)")
+
+          # Sanitize inputs for markdown table (escape pipes, strip newlines)
+          SAFE_TITLE=$(echo "$ISSUE_TITLE" | tr -d '\n\r' | sed 's/|/\\|/g')
+          SAFE_CORRECTION=$(echo "$CORRECTION_TEXT" | tr -d '\n\r' | sed 's/|/\\|/g')
+
+          # Get the current tracking issue body
+          CURRENT_BODY=$(gh issue view "$TRACKING_ISSUE" --repo "$REPO" --json body --jq '.body')
+
+          # Count existing corrections to determine the next number
+          NEXT_NUM=$(( $(echo "$CURRENT_BODY" | grep -c '^| [0-9]') + 1 ))
+
+          # Get today's date
+          TODAY=$(date -u +%Y-%m-%d)
+
+          # Append new row to the table
+          NEW_ROW="| ${NEXT_NUM} | [#${ISSUE_NUMBER}](https://github.com/${REPO}/issues/${ISSUE_NUMBER}) — ${SAFE_TITLE} | [comment](${COMMENT_URL}) — ${SAFE_CORRECTION} | ${TODAY} |"
+          UPDATED_BODY="${CURRENT_BODY}
+          ${NEW_ROW}"
+
+          gh issue edit "$TRACKING_ISSUE" --repo "$REPO" --body "$UPDATED_BODY"
+          echo "Appended correction #$NEXT_NUM to tracking issue #$TRACKING_ISSUE"
+
+      - name: Auto-assign CCA if threshold reached
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TRACKING_ISSUE: ${{ steps.tracking.outputs.tracking_issue }}
+          THRESHOLD: "10"
+        run: |
+          # Count corrections in the tracking issue
+          BODY=$(gh issue view "$TRACKING_ISSUE" --repo "$REPO" --json body --jq '.body')
+          COUNT=$(echo "$BODY" | grep -c '^| [0-9]' || true)
+
+          # Check if CCA is already assigned
+          COPILOT_ASSIGNED=$(gh issue view "$TRACKING_ISSUE" --repo "$REPO" --json assignees --jq '[.assignees[].login] | index("copilot") != null')
+
+          if [ "$COUNT" -ge "$THRESHOLD" ] && [ "$COPILOT_ASSIGNED" != "true" ]; then
+            echo "Threshold reached ($COUNT >= $THRESHOLD). Assigning CCA..."
+            gh issue edit "$TRACKING_ISSUE" --repo "$REPO" --add-assignee copilot
+          else
+            echo "Threshold not reached ($COUNT/$THRESHOLD) or CCA already assigned. Skipping."
+          fi
