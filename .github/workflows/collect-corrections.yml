@@ -20,11 +20,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ github.event.client_payload.issue_number }}
-          CATEGORY: ${{ github.event.client_payload.category }}
-          DETAILS: ${{ github.event.client_payload.details }}
+          # From slash command form fields (keyed by label)
+          FORM_CATEGORY: ${{ github.event.client_payload['What went wrong?'] }}
+          FORM_DETAILS: ${{ github.event.client_payload.Details }}
+          # From slash command context
+          COMMAND_ISSUE_NUMBER: ${{ github.event.client_payload.command.resource.number }}
+          # From manual CLI dispatch
+          CLI_ISSUE_NUMBER: ${{ github.event.client_payload.issue_number }}
+          CLI_CATEGORY: ${{ github.event.client_payload.category }}
+          CLI_DETAILS: ${{ github.event.client_payload.details }}
           SENDER: ${{ github.event.sender.login }}
         run: |
+          # Resolve fields from either slash command or CLI dispatch
+          ISSUE_NUMBER="${COMMAND_ISSUE_NUMBER:-$CLI_ISSUE_NUMBER}"
+          CATEGORY="${FORM_CATEGORY:-$CLI_CATEGORY}"
+          DETAILS="${FORM_DETAILS:-$CLI_DETAILS}"
           # Validate required fields
           if [ -z "$ISSUE_NUMBER" ]; then
             echo "::error::Missing issue_number in payload"
@@ -48,6 +58,7 @@ jobs:
 
           echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
           echo "sender=$SENDER" >> "$GITHUB_OUTPUT"
+          echo "category=$CATEGORY" >> "$GITHUB_OUTPUT"
 
           {
             echo "issue_title<<EOF_TITLE"
@@ -120,7 +131,7 @@ jobs:
           ISSUE_TITLE: ${{ steps.context.outputs.issue_title }}
           CORRECTION_TEXT: ${{ steps.context.outputs.correction_text }}
           SENDER: ${{ steps.context.outputs.sender }}
-          CATEGORY: ${{ github.event.client_payload.category }}
+          CATEGORY: ${{ steps.context.outputs.category }}
         run: |
           # Sanitize inputs for markdown table (escape pipes, strip newlines)
           SAFE_TITLE=$(echo "$ISSUE_TITLE" | tr -d '\n\r' | sed 's/|/\\|/g')
