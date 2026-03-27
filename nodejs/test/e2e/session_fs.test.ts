@@ -2,236 +2,38 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { beforeEach, describe, expect, it, onTestFinished } from "vitest";
+import { MemoryProvider } from "@platformatic/vfs";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { CopilotClient } from "../../src/client.js";
-import { approveAll, type SessionFsConfig } from "../../src/index.js";
+import { approveAll, defineTool, SessionEvent, type SessionFsConfig } from "../../src/index.js";
 import { createSdkTestContext } from "./harness/sdkTestContext.js";
 
-/**
- * In-memory session filesystem for testing.
- * Implements the SessionFs handler interface by storing file contents
- * in a nested Map structure (sessionId → path → content).
- * Tracks call counts per operation for test assertions.
- */
-class InMemorySessionFs {
-    // sessionId → path → content
-    private files = new Map<string, Map<string, string>>();
-    // sessionId → Set<dirPath>
-    private dirs = new Map<string, Set<string>>();
-    readonly calls = {
-        readFile: 0,
-        writeFile: 0,
-        appendFile: 0,
-        exists: 0,
-        stat: 0,
-        mkdir: 0,
-        readdir: 0,
-        rm: 0,
-        rename: 0,
-    };
-
-    public reset() {
-        this.files.clear();
-        this.dirs.clear();
-        for (const key in this.calls) {
-            this.calls[key as keyof typeof this.calls] = 0;
-        }
-    }
-
-    private getSessionFiles(sessionId: string): Map<string, string> {
-        let m = this.files.get(sessionId);
-        if (!m) {
-            m = new Map();
-            this.files.set(sessionId, m);
-        }
-        return m;
-    }
-
-    private getSessionDirs(sessionId: string): Set<string> {
-        let s = this.dirs.get(sessionId);
-        if (!s) {
-            s = new Set();
-            this.dirs.set(sessionId, s);
-        }
-        return s;
-    }
-
-    /** Derive parent directory from a path (using linux conventions). */
-    private parentDir(p: string): string {
-        const i = p.lastIndexOf("/");
-        return i > 0 ? p.substring(0, i) : "/";
-    }
-
-    /** List all entry names directly under a directory path. */
-    private entriesUnder(sessionId: string, dirPath: string): string[] {
-        const prefix = dirPath.endsWith("/") ? dirPath : dirPath + "/";
-        const entries = new Set<string>();
-
-        for (const p of this.getSessionFiles(sessionId).keys()) {
-            if (p.startsWith(prefix)) {
-                const rest = p.substring(prefix.length);
-                const name = rest.split("/")[0];
-                if (name) entries.add(name);
-            }
-        }
-        for (const d of this.getSessionDirs(sessionId)) {
-            if (d.startsWith(prefix)) {
-                const rest = d.substring(prefix.length);
-                const name = rest.split("/")[0];
-                if (name) entries.add(name);
-            }
-        }
-        return [...entries];
-    }
-
-    toConfig(initialCwd: string, sessionStatePath: string): SessionFsConfig {
-        return {
-            initialCwd,
-            sessionStatePath,
-            conventions: "linux",
-            readFile: async ({ sessionId, path }) => {
-                this.calls.readFile++;
-                const content = this.getSessionFiles(sessionId).get(path);
-                if (content === undefined) {
-                    throw new Error(`ENOENT: ${path}`);
-                }
-                return { content };
-            },
-            writeFile: async ({ sessionId, path, content }) => {
-                this.calls.writeFile++;
-                this.getSessionFiles(sessionId).set(path, content);
-            },
-            appendFile: async ({ sessionId, path, content }) => {
-                this.calls.appendFile++;
-                const files = this.getSessionFiles(sessionId);
-                files.set(path, (files.get(path) ?? "") + content);
-            },
-            exists: async ({ sessionId, path }) => {
-                this.calls.exists++;
-                const files = this.getSessionFiles(sessionId);
-                const dirs = this.getSessionDirs(sessionId);
-                return { exists: files.has(path) || dirs.has(path) };
-            },
-            stat: async ({ sessionId, path }) => {
-                this.calls.stat++;
-                const files = this.getSessionFiles(sessionId);
-                const dirs = this.getSessionDirs(sessionId);
-                const now = new Date().toISOString();
-
-                if (files.has(path)) {
-                    return {
-                        isFile: true,
-                        isDirectory: false,
-                        size: Buffer.byteLength(files.get(path)!),
-                        mtime: now,
-                        birthtime: now,
-                    };
-                }
-                if (dirs.has(path)) {
-                    return {
-                        isFile: false,
-                        isDirectory: true,
-                        size: 0,
-                        mtime: now,
-                        birthtime: now,
-                    };
-                }
-                throw new Error(`ENOENT: ${path}`);
-            },
-            mkdir: async ({ sessionId, path, recursive }) => {
-                this.calls.mkdir++;
-                const dirs = this.getSessionDirs(sessionId);
-                if (recursive) {
-                    // Create all ancestors
-                    let current = path;
-                    while (current && current !== "/") {
-                        dirs.add(current);
-                        current = this.parentDir(current);
-                    }
-                } else {
-                    dirs.add(path);
-                }
-            },
-            readdir: async ({ sessionId, path }) => {
-                this.calls.readdir++;
-                return { entries: this.entriesUnder(sessionId, path) };
-            },
-            rm: async ({ sessionId, path, recursive }) => {
-                this.calls.rm++;
-                const files = this.getSessionFiles(sessionId);
-                const dirs = this.getSessionDirs(sessionId);
-                if (recursive) {
-                    const prefix = path.endsWith("/") ? path : path + "/";
-                    for (const p of [...files.keys()]) {
-                        if (p === path || p.startsWith(prefix)) files.delete(p);
-                    }
-                    for (const d of [...dirs]) {
-                        if (d === path || d.startsWith(prefix)) dirs.delete(d);
-                    }
-                } else {
-                    files.delete(path);
-                    dirs.delete(path);
-                }
-            },
-            rename: async ({ sessionId, src, dest }) => {
-                this.calls.rename++;
-                const files = this.getSessionFiles(sessionId);
-                const content = files.get(src);
-                if (content !== undefined) {
-                    files.delete(src);
-                    files.set(dest, content);
-                }
-            },
-        };
-    }
-
-    /** Get all file paths for a session. */
-    getFilePaths(sessionId: string): string[] {
-        return [...(this.files.get(sessionId)?.keys() ?? [])];
-    }
-
-    /** Get content of a specific file. */
-    getFileContent(sessionId: string, path: string): string | undefined {
-        return this.files.get(sessionId)?.get(path);
-    }
-
-    /** Check whether any files exist for a given session. */
-    hasSession(sessionId: string): boolean {
-        const files = this.files.get(sessionId);
-        return files !== undefined && files.size > 0;
-    }
-
-    /** Get the number of sessions with files. */
-    get sessionCount(): number {
-        let count = 0;
-        for (const files of this.files.values()) {
-            if (files.size > 0) count++;
-        }
-        return count;
-    }
-}
-
 describe("Session Fs", async () => {
-    const fs = new InMemorySessionFs();
-    beforeEach(() => fs.reset());
+    // Single provider for the describe block — session IDs are unique per test,
+    // so no cross-contamination between tests.
+    const provider = new MemoryProvider();
+    const { config } = createMemorySessionFs("/projects/test", "/session-state", provider);
+
+    // Helpers to build session-namespaced paths for direct provider assertions
+    const p = (sessionId: string, path: string) =>
+        `/${sessionId}${path.startsWith("/") ? path : "/" + path}`;
 
     const { copilotClient: client, env } = await createSdkTestContext({
         copilotClientOptions: {
-            sessionFs: fs.toConfig("/projects/test", "/session-state"),
+            sessionFs: config,
         },
     });
 
     it("should route file operations through the session fs provider", async () => {
         const session = await client.createSession({ onPermissionRequest: approveAll });
 
-        // Send a message and wait for the response
         const msg = await session.sendAndWait({ prompt: "What is 100 + 200?" });
         expect(msg?.data.content).toContain("300");
+        await session.disconnect();
 
-        // Verify file operations were routed through our fs provider.
-        // The runtime writes events as JSONL through appendFile/writeFile.
-        // TODO: Replace these assertions with reading the events.jsonl file
-        await expect.poll(() => fs.calls.writeFile + fs.calls.appendFile).toBeGreaterThan(0);
+        const buf = await provider.readFile(p(session.sessionId, "/session-state/events.jsonl"));
+        const content = buf.toString("utf8");
+        expect(content).toContain("300");
     });
 
     it("should load session data from fs provider on resume", async () => {
@@ -242,16 +44,16 @@ describe("Session Fs", async () => {
         expect(msg?.data.content).toContain("100");
         await session1.disconnect();
 
-        // Verify readFile is called when resuming (to load events)
-        const readCountBefore = fs.calls.readFile;
+        // The events file should exist before resume
+        expect(await provider.exists(p(sessionId, "/session-state/events.jsonl"))).toBe(true);
+
         const session2 = await client.resumeSession(sessionId, {
             onPermissionRequest: approveAll,
         });
 
-        expect(fs.calls.readFile).toBeGreaterThan(readCountBefore);
-
-        // Send another message to verify the session is functional
+        // Send another message to verify the session is functional after resume
         const msg2 = await session2.sendAndWait({ prompt: "What is that times 3?" });
+        await session2.disconnect();
         expect(msg2?.data.content).toContain("300");
     });
 
@@ -267,15 +69,123 @@ describe("Session Fs", async () => {
 
         // Second client tries to connect with a session fs — should fail
         // because sessions already exist on the runtime.
-        const sessionFs = new InMemorySessionFs();
+        const { config: config2 } = createMemorySessionFs(
+            "/projects/test",
+            "/session-state",
+            new MemoryProvider()
+        );
         const client2 = new CopilotClient({
             env,
             logLevel: "error",
             cliUrl: `localhost:${port}`,
-            sessionFs: sessionFs.toConfig("/projects/test", "/session-state"),
+            sessionFs: config2,
         });
         onTestFinished(() => client2.forceStop());
 
         await expect(client2.start()).rejects.toThrow();
     });
+
+    it("should map large output handling into sessionFs", async () => {
+        const suppliedFileContent = "x".repeat(100_000);
+        const session = await client.createSession({
+            onPermissionRequest: approveAll,
+            tools: [
+                defineTool("get_big_string", {
+                    description: "Returns a large string",
+                    handler: async () => suppliedFileContent,
+                }),
+            ],
+        });
+
+        await session.sendAndWait({
+            prompt: "Call the get_big_string tool and reply with the word DONE only.",
+        });
+
+        // The tool result should reference a temp file under the session state path
+        const messages = await session.getMessages();
+        const toolResult = findToolCallResult(messages, "get_big_string");
+        expect(toolResult).toContain("/session-state/temp/");
+        const filename = toolResult?.match(/(\/session-state\/temp\/[^\s]+)/)?.[1];
+        expect(filename).toBeDefined();
+
+        // Verify the file was written with the correct content via the provider
+        const fileContent = await provider.readFile(p(session.sessionId, filename!), "utf8");
+        expect(fileContent).toBe(suppliedFileContent);
+    });
 });
+
+function findToolCallResult(messages: SessionEvent[], toolName: string): string | undefined {
+    for (const m of messages) {
+        if (m.type === "tool.execution_complete") {
+            if (findToolName(messages, m.data.toolCallId) === toolName) {
+                return m.data.result?.content;
+            }
+        }
+    }
+}
+
+function findToolName(messages: SessionEvent[], toolCallId: string): string | undefined {
+    for (const m of messages) {
+        if (m.type === "tool.execution_start" && m.data.toolCallId === toolCallId) {
+            return m.data.toolName;
+        }
+    }
+}
+
+/**
+ * Builds a SessionFsConfig backed by a @platformatic/vfs MemoryProvider.
+ * Each sessionId is namespaced under `/<sessionId>/` in the provider's tree.
+ * Tests can assert directly against the returned MemoryProvider instance.
+ */
+function createMemorySessionFs(
+    initialCwd: string,
+    sessionStatePath: string,
+    provider: MemoryProvider
+): { config: SessionFsConfig } {
+    const sp = (sessionId: string, path: string) =>
+        `/${sessionId}${path.startsWith("/") ? path : "/" + path}`;
+
+    const config: SessionFsConfig = {
+        initialCwd,
+        sessionStatePath,
+        conventions: "linux",
+        readFile: async ({ sessionId, path }) => {
+            const content = await provider.readFile(sp(sessionId, path), "utf8");
+            return { content: content as string };
+        },
+        writeFile: async ({ sessionId, path, content }) => {
+            await provider.writeFile(sp(sessionId, path), content);
+        },
+        appendFile: async ({ sessionId, path, content }) => {
+            await provider.appendFile(sp(sessionId, path), content);
+        },
+        exists: async ({ sessionId, path }) => {
+            return { exists: await provider.exists(sp(sessionId, path)) };
+        },
+        stat: async ({ sessionId, path }) => {
+            const st = await provider.stat(sp(sessionId, path));
+            return {
+                isFile: st.isFile(),
+                isDirectory: st.isDirectory(),
+                size: st.size,
+                mtime: new Date(st.mtimeMs).toISOString(),
+                birthtime: new Date(st.birthtimeMs).toISOString(),
+            };
+        },
+        mkdir: async ({ sessionId, path, recursive }) => {
+            await provider.mkdir(sp(sessionId, path), { recursive: recursive ?? false });
+        },
+        readdir: async ({ sessionId, path }) => {
+            const entries = await provider.readdir(sp(sessionId, path));
+            return { entries: entries as string[] };
+        },
+        rm: async ({ sessionId, path }) => {
+            await provider.unlink(sp(sessionId, path));
+        },
+        rename: async ({ sessionId, src, dest }) => {
+            await provider.rename(sp(sessionId, src), sp(sessionId, dest));
+        },
+    };
+
+    return { config };
+}
