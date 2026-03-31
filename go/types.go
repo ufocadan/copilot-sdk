@@ -610,10 +610,10 @@ type ProviderConfig struct {
 	// MaxContextWindowTokens overrides the maximum context window size in tokens.
 	// When set, takes precedence over the default limit from the model's capability catalog entry.
 	MaxContextWindowTokens int `json:"maxContextWindowTokens,omitempty"`
-	// ModelLimitsId specifies the model ID used to look up default token limits from the capability catalog.
+	// ModelLimitsID specifies the model ID used to look up default token limits from the capability catalog.
 	// When unset, the session's configured model ID is used.
 	// Useful for fine-tuned models that share the same limits as a base model.
-	ModelLimitsId string `json:"modelLimitsId,omitempty"`
+	ModelLimitsID string `json:"modelLimitsId,omitempty"`
 }
 
 // AzureProviderOptions contains Azure-specific provider configuration
