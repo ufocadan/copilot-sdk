@@ -7,11 +7,11 @@
  */
 
 // Import and re-export generated session event types
-import type { SessionEvent as GeneratedSessionEvent } from "./generated/session-events.js";
-export type SessionEvent = GeneratedSessionEvent;
-
 import type { SessionFsHandler } from "./generated/rpc.js";
+import type { SessionEvent as GeneratedSessionEvent } from "./generated/session-events.js";
 import type { CopilotSession } from "./session.js";
+export type SessionEvent = GeneratedSessionEvent;
+export type { SessionFsHandler } from "./generated/rpc.js";
 
 /**
  * Options for creating a CopilotClient
