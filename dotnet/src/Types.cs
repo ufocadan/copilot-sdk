@@ -324,6 +324,177 @@ public class ToolResultObject
     /// </summary>
     [JsonPropertyName("toolTelemetry")]
     public Dictionary<string, object>? ToolTelemetry { get; set; }
+
+    /// <summary>
+    /// Attempts to interpret the result as an MCP <c>CallToolResult</c>
+    /// (shape: <c>{ content: [...], isError?: bool }</c>) and converts it to a
+    /// <see cref="ToolResultObject"/>. Returns <see langword="null"/> if the value does
+    /// not match the expected shape.
+    /// </summary>
+    internal static ToolResultObject? TryConvertFromCallToolResult(object? result)
+    {
+        if (result is not JsonElement element)
+        {
+            return null;
+        }
+
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if (!element.TryGetProperty("content", out var contentProp) || contentProp.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        // Validate every element has a string "type" field
+        foreach (var item in contentProp.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object ||
+                !item.TryGetProperty("type", out var typeProp) ||
+                typeProp.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+        }
+
+        List<string>? textParts = null;
+        List<ToolBinaryResult>? binaryResults = null;
+
+        foreach (var block in contentProp.EnumerateArray())
+        {
+            var blockType = block.GetProperty("type").GetString();
+
+            switch (blockType)
+            {
+                case "text":
+                    if (block.TryGetProperty("text", out var textProp) && textProp.ValueKind == JsonValueKind.String)
+                    {
+                        (textParts ??= []).Add(textProp.GetString()!);
+                    }
+                    break;
+
+                case "image":
+                    (binaryResults ??= []).Add(new ToolBinaryResult
+                    {
+                        Data = block.TryGetProperty("data", out var imgData) && imgData.ValueKind == JsonValueKind.String ? imgData.GetString() ?? "" : "",
+                        MimeType = block.TryGetProperty("mimeType", out var imgMime) && imgMime.ValueKind == JsonValueKind.String ? imgMime.GetString() ?? "" : "",
+                        Type = "image",
+                    });
+                    break;
+
+                case "resource":
+                    if (block.TryGetProperty("resource", out var resProp) && resProp.ValueKind == JsonValueKind.Object)
+                    {
+                        if (resProp.TryGetProperty("text", out var resText) && resText.ValueKind == JsonValueKind.String)
+                        {
+                            var text = resText.GetString();
+                            if (!string.IsNullOrEmpty(text))
+                            {
+                                (textParts ??= []).Add(text!);
+                            }
+                        }
+
+                        if (resProp.TryGetProperty("blob", out var resBlob) && resBlob.ValueKind == JsonValueKind.String)
+                        {
+                            var blob = resBlob.GetString();
+                            if (!string.IsNullOrEmpty(blob))
+                            {
+                                var mimeType = resProp.TryGetProperty("mimeType", out var resMime) && resMime.ValueKind == JsonValueKind.String
+                                    ? resMime.GetString() ?? "application/octet-stream"
+                                    : "application/octet-stream";
+                                var uri = resProp.TryGetProperty("uri", out var resUri) && resUri.ValueKind == JsonValueKind.String
+                                    ? resUri.GetString()
+                                    : null;
+
+                                (binaryResults ??= []).Add(new ToolBinaryResult
+                                {
+                                    Data = blob!,
+                                    MimeType = mimeType,
+                                    Type = "resource",
+                                    Description = uri,
+                                });
+                            }
+                        }
+                    }
+                    break;
+            }
+        }
+
+        var isError = element.TryGetProperty("isError", out var isErrorProp) &&
+                      isErrorProp.ValueKind == JsonValueKind.True;
+
+        return new ToolResultObject
+        {
+            TextResultForLlm = textParts is not null ? string.Join("\n", textParts) : "",
+            ResultType = isError ? "failure" : "success",
+            BinaryResultsForLlm = binaryResults,
+        };
+    }
+
+    /// <summary>
+    /// Attempts to convert a result from an <see cref="AIFunction"/> invocation into a
+    /// <see cref="ToolResultObject"/>. Handles <see cref="TextContent"/>,
+    /// <see cref="DataContent"/>, and collections of <see cref="AIContent"/>.
+    /// Returns <see langword="null"/> if the value is not a recognized <see cref="AIContent"/> type.
+    /// </summary>
+    internal static ToolResultObject? TryConvertFromAIContent(object? result)
+    {
+        if (result is AIContent singleContent)
+        {
+            return ConvertAIContents([singleContent]);
+        }
+
+        if (result is IEnumerable<AIContent> contentList)
+        {
+            return ConvertAIContents(contentList);
+        }
+
+        return null;
+    }
+
+    private static ToolResultObject ConvertAIContents(IEnumerable<AIContent> contents)
+    {
+        List<string>? textParts = null;
+        List<ToolBinaryResult>? binaryResults = null;
+
+        foreach (var content in contents)
+        {
+            switch (content)
+            {
+                case TextContent textContent:
+                    if (textContent.Text is { } text)
+                    {
+                        (textParts ??= []).Add(text);
+                    }
+                    break;
+
+                case DataContent dataContent:
+                    (binaryResults ??= []).Add(new ToolBinaryResult
+                    {
+                        Data = dataContent.Base64Data.ToString(),
+                        MimeType = dataContent.MediaType ?? "application/octet-stream",
+                        Type = dataContent.HasTopLevelMediaType("image") ? "image" : "resource",
+                    });
+                    break;
+
+                default:
+                    (textParts ??= []).Add(SerializeAIContent(content));
+                    break;
+            }
+        }
+
+        return new ToolResultObject
+        {
+            TextResultForLlm = textParts is not null ? string.Join("\n", textParts) : "",
+            ResultType = "success",
+            BinaryResultsForLlm = binaryResults,
+        };
+    }
+
+    private static string SerializeAIContent(AIContent content) =>
+        JsonSerializer.Serialize(content, AIJsonUtilities.DefaultOptions.GetTypeInfo(typeof(AIContent)));
 }
 
 /// <summary>

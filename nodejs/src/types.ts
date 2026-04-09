@@ -207,6 +207,119 @@ export type ToolResultObject = {
 
 export type ToolResult = string | ToolResultObject;
 
+// ============================================================================
+// MCP CallToolResult support
+// ============================================================================
+
+/**
+ * Content block types within an MCP CallToolResult.
+ */
+type CallToolResultTextContent = {
+    type: "text";
+    text: string;
+};
+
+type CallToolResultImageContent = {
+    type: "image";
+    data: string;
+    mimeType: string;
+};
+
+type CallToolResultResourceContent = {
+    type: "resource";
+    resource: {
+        uri: string;
+        mimeType?: string;
+        text?: string;
+        blob?: string;
+    };
+};
+
+type CallToolResultContent =
+    | CallToolResultTextContent
+    | CallToolResultImageContent
+    | CallToolResultResourceContent;
+
+/**
+ * MCP-compatible CallToolResult type. When a tool handler returns this shape,
+ * the SDK automatically converts it to a {@link ToolResultObject} before
+ * sending it over RPC.
+ */
+export type CallToolResult = {
+    content: CallToolResultContent[];
+    isError?: boolean;
+};
+
+/**
+ * Type guard that checks whether a value is shaped like an MCP CallToolResult.
+ */
+export function isCallToolResult(value: unknown): value is CallToolResult {
+    if (typeof value !== "object" || value === null) {
+        return false;
+    }
+
+    const obj = value as Record<string, unknown>;
+    if (!Array.isArray(obj.content)) {
+        return false;
+    }
+
+    // Verify every element in content has a valid "type" field
+    return obj.content.every(
+        (item: unknown) =>
+            typeof item === "object" &&
+            item !== null &&
+            "type" in item &&
+            typeof (item as Record<string, unknown>).type === "string"
+    );
+}
+
+/**
+ * Converts an MCP CallToolResult into the SDK's ToolResultObject format.
+ */
+export function convertCallToolResult(callResult: CallToolResult): ToolResultObject {
+    const textParts: string[] = [];
+    const binaryResults: ToolBinaryResult[] = [];
+
+    for (const block of callResult.content) {
+        switch (block.type) {
+            case "text":
+                // Guard against malformed input where text field is missing at runtime
+                if (typeof block.text === "string") {
+                    textParts.push(block.text);
+                }
+                break;
+            case "image":
+                binaryResults.push({
+                    data: block.data,
+                    mimeType: block.mimeType,
+                    type: "image",
+                });
+                break;
+            case "resource": {
+                // Use optional chaining: resource field may be absent in malformed input
+                if (block.resource?.text) {
+                    textParts.push(block.resource.text);
+                }
+                if (block.resource?.blob) {
+                    binaryResults.push({
+                        data: block.resource.blob,
+                        mimeType: block.resource.mimeType ?? "application/octet-stream",
+                        type: "resource",
+                        description: block.resource.uri,
+                    });
+                }
+                break;
+            }
+        }
+    }
+
+    return {
+        textResultForLlm: textParts.join("\n"),
+        resultType: callResult.isError ? "failure" : "success",
+        ...(binaryResults.length > 0 ? { binaryResultsForLlm: binaryResults } : {}),
+    };
+}
+
 export interface ToolInvocation {
     sessionId: string;
     toolCallId: string;

@@ -55,6 +55,7 @@ import type {
     TraceContextProvider,
     TypedSessionLifecycleHandler,
 } from "./types.js";
+import { isCallToolResult, convertCallToolResult } from "./types.js";
 
 /**
  * Minimum protocol version this SDK can communicate with.
@@ -1927,6 +1928,10 @@ export class CopilotClient {
 
         if (this.isToolResultObject(result)) {
             return result;
+        }
+
+        if (isCallToolResult(result)) {
+            return convertCallToolResult(result);
         }
 
         const textResult = typeof result === "string" ? result : JSON.stringify(result);

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 )
@@ -65,7 +66,8 @@ func createTypedHandler[T any, U any](handler func(T, ToolInvocation) (U, error)
 }
 
 // normalizeResult converts any value to a ToolResult.
-// Strings pass through directly, ToolResult passes through, other types are JSON-serialized.
+// Strings pass through directly, ToolResult passes through, CallToolResult is
+// converted, and other types are JSON-serialized.
 func normalizeResult(result any) (ToolResult, error) {
 	if result == nil {
 		return ToolResult{
@@ -87,6 +89,11 @@ func normalizeResult(result any) (ToolResult, error) {
 		}, nil
 	}
 
+	// MCP CallToolResult shape: { content: [...], isError?: bool }
+	if tr, ok := convertCallToolResult(result); ok {
+		return tr, nil
+	}
+
 	// Everything else gets JSON-serialized
 	jsonBytes, err := json.Marshal(result)
 	if err != nil {
@@ -99,7 +106,101 @@ func normalizeResult(result any) (ToolResult, error) {
 	}, nil
 }
 
-// generateSchemaForType generates a JSON schema map from a Go type using reflection.
+// convertCallToolResult attempts to interpret value as an MCP CallToolResult
+// (map with "content" array and optional "isError" bool). Returns the converted
+// ToolResult and true if it matched, or a zero ToolResult and false otherwise.
+func convertCallToolResult(value any) (ToolResult, bool) {
+	m, ok := value.(map[string]any)
+	if !ok {
+		jsonBytes, err := json.Marshal(value)
+		if err != nil {
+			return ToolResult{}, false
+		}
+
+		if err := json.Unmarshal(jsonBytes, &m); err != nil {
+			return ToolResult{}, false
+		}
+	}
+
+	contentRaw, exists := m["content"]
+	if !exists {
+		return ToolResult{}, false
+	}
+
+	contentSlice, ok := contentRaw.([]any)
+	if !ok {
+		return ToolResult{}, false
+	}
+
+	// Verify every element has a string "type" field
+	for _, item := range contentSlice {
+		block, ok := item.(map[string]any)
+		if !ok {
+			return ToolResult{}, false
+		}
+		if _, ok := block["type"].(string); !ok {
+			return ToolResult{}, false
+		}
+	}
+
+	var textParts []string
+	var binaryResults []ToolBinaryResult
+
+	for _, item := range contentSlice {
+		block := item.(map[string]any)
+		blockType := block["type"].(string)
+
+		switch blockType {
+		case "text":
+			if text, ok := block["text"].(string); ok {
+				textParts = append(textParts, text)
+			}
+		case "image":
+			data, _ := block["data"].(string)
+			mimeType, _ := block["mimeType"].(string)
+			binaryResults = append(binaryResults, ToolBinaryResult{
+				Data:     data,
+				MimeType: mimeType,
+				Type:     "image",
+			})
+		case "resource":
+			if resRaw, ok := block["resource"].(map[string]any); ok {
+				if text, ok := resRaw["text"].(string); ok && text != "" {
+					textParts = append(textParts, text)
+				}
+				if blob, ok := resRaw["blob"].(string); ok && blob != "" {
+					mimeType, _ := resRaw["mimeType"].(string)
+					if mimeType == "" {
+						mimeType = "application/octet-stream"
+					}
+					uri, _ := resRaw["uri"].(string)
+					binaryResults = append(binaryResults, ToolBinaryResult{
+						Data:        blob,
+						MimeType:    mimeType,
+						Type:        "resource",
+						Description: uri,
+					})
+				}
+			}
+		}
+	}
+
+	resultType := "success"
+	if isErr, ok := m["isError"].(bool); ok && isErr {
+		resultType = "failure"
+	}
+
+	tr := ToolResult{
+		TextResultForLLM: strings.Join(textParts, "\n"),
+		ResultType:       resultType,
+	}
+	if len(binaryResults) > 0 {
+		tr.BinaryResultsForLLM = binaryResults
+	}
+	return tr, true
+}
+
+// generateSchemaForTypegenerates a JSON schema map from a Go type using reflection.
 // Panics if schema generation fails, as this indicates a programming error.
 func generateSchemaForType(t reflect.Type) map[string]any {
 	if t == nil {

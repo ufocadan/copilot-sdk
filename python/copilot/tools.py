@@ -240,6 +240,7 @@ def _normalize_result(result: Any) -> ToolResult:
     - None returns empty success
     - Strings pass through directly
     - ToolResult passes through
+    - MCP CallToolResult dicts are converted automatically
     - Everything else gets JSON-serialized (with Pydantic support)
     """
     if result is None:
@@ -259,6 +260,10 @@ def _normalize_result(result: Any) -> ToolResult:
             result_type="success",
         )
 
+    # MCP CallToolResult shape: { content: [...], isError?: bool }
+    if _is_call_tool_result(result):
+        return _convert_call_tool_result(result)
+
     # Everything else gets JSON-serialized (with Pydantic model support)
     def default(obj: Any) -> Any:
         if isinstance(obj, BaseModel):
@@ -273,4 +278,51 @@ def _normalize_result(result: Any) -> ToolResult:
     return ToolResult(
         text_result_for_llm=json_str,
         result_type="success",
+    )
+
+
+def _is_call_tool_result(value: Any) -> bool:
+    """Check whether a value is shaped like an MCP CallToolResult."""
+    if not isinstance(value, dict):
+        return False
+    content = value.get("content")
+    if not isinstance(content, list):
+        return False
+    return all(
+        isinstance(item, dict) and isinstance(item.get("type"), str)
+        for item in content
+    )
+
+
+def _convert_call_tool_result(call_result: dict[str, Any]) -> ToolResult:
+    """Convert an MCP CallToolResult dict into a ToolResult."""
+    text_parts: list[str] = []
+    binary_results: list[ToolBinaryResult] = []
+
+    for block in call_result["content"]:
+        block_type = block.get("type")
+        if block_type == "text":
+            text_parts.append(block.get("text", ""))
+        elif block_type == "image":
+            binary_results.append(ToolBinaryResult(
+                data=block.get("data", ""),
+                mime_type=block.get("mimeType", ""),
+                type="image",
+            ))
+        elif block_type == "resource":
+            resource = block.get("resource", {})
+            if resource.get("text"):
+                text_parts.append(resource["text"])
+            if resource.get("blob"):
+                binary_results.append(ToolBinaryResult(
+                    data=resource["blob"],
+                    mime_type=resource.get("mimeType", "application/octet-stream"),
+                    type="resource",
+                    description=resource.get("uri", ""),
+                ))
+
+    return ToolResult(
+        text_result_for_llm="\n".join(text_parts),
+        result_type="failure" if call_result.get("isError") else "success",
+        binary_results_for_llm=binary_results if binary_results else None,
     )

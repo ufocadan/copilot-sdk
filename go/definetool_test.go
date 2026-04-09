@@ -253,6 +253,190 @@ func TestNormalizeResult(t *testing.T) {
 	})
 }
 
+func TestConvertCallToolResult(t *testing.T) {
+	t.Run("typed CallToolResult struct is converted", func(t *testing.T) {
+		type Resource struct {
+			URI  string `json:"uri"`
+			Text string `json:"text"`
+		}
+		type ContentBlock struct {
+			Type     string    `json:"type"`
+			Resource *Resource `json:"resource,omitempty"`
+		}
+		type CallToolResult struct {
+			Content []ContentBlock `json:"content"`
+		}
+
+		input := CallToolResult{
+			Content: []ContentBlock{
+				{
+					Type:     "resource",
+					Resource: &Resource{URI: "file:///report.txt", Text: "details"},
+				},
+			},
+		}
+
+		result, err := normalizeResult(input)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if result.TextResultForLLM != "details" {
+			t.Errorf("Expected 'details', got %q", result.TextResultForLLM)
+		}
+		if result.ResultType != "success" {
+			t.Errorf("Expected 'success', got %q", result.ResultType)
+		}
+	})
+
+	t.Run("text-only CallToolResult is converted", func(t *testing.T) {
+		input := map[string]any{
+			"content": []any{
+				map[string]any{"type": "text", "text": "hello"},
+			},
+		}
+
+		result, err := normalizeResult(input)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if result.TextResultForLLM != "hello" {
+			t.Errorf("Expected 'hello', got %q", result.TextResultForLLM)
+		}
+		if result.ResultType != "success" {
+			t.Errorf("Expected 'success', got %q", result.ResultType)
+		}
+	})
+
+	t.Run("multiple text blocks are joined with newline", func(t *testing.T) {
+		input := map[string]any{
+			"content": []any{
+				map[string]any{"type": "text", "text": "line 1"},
+				map[string]any{"type": "text", "text": "line 2"},
+			},
+		}
+
+		result, err := normalizeResult(input)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if result.TextResultForLLM != "line 1\nline 2" {
+			t.Errorf("Expected 'line 1\\nline 2', got %q", result.TextResultForLLM)
+		}
+	})
+
+	t.Run("isError maps to failure resultType", func(t *testing.T) {
+		input := map[string]any{
+			"content": []any{
+				map[string]any{"type": "text", "text": "oops"},
+			},
+			"isError": true,
+		}
+
+		result, err := normalizeResult(input)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if result.ResultType != "failure" {
+			t.Errorf("Expected 'failure', got %q", result.ResultType)
+		}
+	})
+
+	t.Run("image content becomes binaryResultsForLLM", func(t *testing.T) {
+		input := map[string]any{
+			"content": []any{
+				map[string]any{"type": "image", "data": "base64data", "mimeType": "image/png"},
+			},
+		}
+
+		result, err := normalizeResult(input)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if len(result.BinaryResultsForLLM) != 1 {
+			t.Fatalf("Expected 1 binary result, got %d", len(result.BinaryResultsForLLM))
+		}
+		if result.BinaryResultsForLLM[0].Data != "base64data" {
+			t.Errorf("Expected data 'base64data', got %q", result.BinaryResultsForLLM[0].Data)
+		}
+		if result.BinaryResultsForLLM[0].MimeType != "image/png" {
+			t.Errorf("Expected mimeType 'image/png', got %q", result.BinaryResultsForLLM[0].MimeType)
+		}
+	})
+
+	t.Run("resource text goes to textResultForLLM", func(t *testing.T) {
+		input := map[string]any{
+			"content": []any{
+				map[string]any{
+					"type":     "resource",
+					"resource": map[string]any{"uri": "file:///tmp/data.txt", "text": "file contents"},
+				},
+			},
+		}
+
+		result, err := normalizeResult(input)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if result.TextResultForLLM != "file contents" {
+			t.Errorf("Expected 'file contents', got %q", result.TextResultForLLM)
+		}
+	})
+
+	t.Run("resource blob goes to binaryResultsForLLM", func(t *testing.T) {
+		input := map[string]any{
+			"content": []any{
+				map[string]any{
+					"type":     "resource",
+					"resource": map[string]any{"uri": "file:///img.png", "blob": "blobdata", "mimeType": "image/png"},
+				},
+			},
+		}
+
+		result, err := normalizeResult(input)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if len(result.BinaryResultsForLLM) != 1 {
+			t.Fatalf("Expected 1 binary result, got %d", len(result.BinaryResultsForLLM))
+		}
+		if result.BinaryResultsForLLM[0].Description != "file:///img.png" {
+			t.Errorf("Expected description 'file:///img.png', got %q", result.BinaryResultsForLLM[0].Description)
+		}
+	})
+
+	t.Run("non-CallToolResult map is JSON serialized", func(t *testing.T) {
+		input := map[string]any{
+			"key": "value",
+		}
+
+		result, err := normalizeResult(input)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		expected := `{"key":"value"}`
+		if result.TextResultForLLM != expected {
+			t.Errorf("Expected %q, got %q", expected, result.TextResultForLLM)
+		}
+	})
+
+	t.Run("empty content array is converted", func(t *testing.T) {
+		input := map[string]any{
+			"content": []any{},
+		}
+
+		result, err := normalizeResult(input)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if result.TextResultForLLM != "" {
+			t.Errorf("Expected empty text, got %q", result.TextResultForLLM)
+		}
+		if result.ResultType != "success" {
+			t.Errorf("Expected 'success', got %q", result.ResultType)
+		}
+	})
+}
+
 func TestGenerateSchemaForType(t *testing.T) {
 	t.Run("generates schema for simple struct", func(t *testing.T) {
 		type Simple struct {
