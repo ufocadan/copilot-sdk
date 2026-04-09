@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isCallToolResult, convertCallToolResult } from "../src/types.js";
-import type { CallToolResult, ToolResultObject } from "../src/types.js";
+import type { CallToolResult } from "../src/types.js";
 
 describe("isCallToolResult", () => {
     it("returns true for a text-only CallToolResult", () => {
@@ -51,9 +51,7 @@ describe("isCallToolResult", () => {
     });
 
     it("returns false for a ToolResultObject", () => {
-        expect(
-            isCallToolResult({ textResultForLlm: "hi", resultType: "success" })
-        ).toBe(false);
+        expect(isCallToolResult({ textResultForLlm: "hi", resultType: "success" })).toBe(false);
     });
 
     it("returns false when content is not an array", () => {

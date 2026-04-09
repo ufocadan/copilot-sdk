@@ -288,10 +288,7 @@ def _is_call_tool_result(value: Any) -> bool:
     content = value.get("content")
     if not isinstance(content, list):
         return False
-    return all(
-        isinstance(item, dict) and isinstance(item.get("type"), str)
-        for item in content
-    )
+    return all(isinstance(item, dict) and isinstance(item.get("type"), str) for item in content)
 
 
 def _convert_call_tool_result(call_result: dict[str, Any]) -> ToolResult:
@@ -304,22 +301,26 @@ def _convert_call_tool_result(call_result: dict[str, Any]) -> ToolResult:
         if block_type == "text":
             text_parts.append(block.get("text", ""))
         elif block_type == "image":
-            binary_results.append(ToolBinaryResult(
-                data=block.get("data", ""),
-                mime_type=block.get("mimeType", ""),
-                type="image",
-            ))
+            binary_results.append(
+                ToolBinaryResult(
+                    data=block.get("data", ""),
+                    mime_type=block.get("mimeType", ""),
+                    type="image",
+                )
+            )
         elif block_type == "resource":
             resource = block.get("resource", {})
             if resource.get("text"):
                 text_parts.append(resource["text"])
             if resource.get("blob"):
-                binary_results.append(ToolBinaryResult(
-                    data=resource["blob"],
-                    mime_type=resource.get("mimeType", "application/octet-stream"),
-                    type="resource",
-                    description=resource.get("uri", ""),
-                ))
+                binary_results.append(
+                    ToolBinaryResult(
+                        data=resource["blob"],
+                        mime_type=resource.get("mimeType", "application/octet-stream"),
+                        type="resource",
+                        description=resource.get("uri", ""),
+                    )
+                )
 
     return ToolResult(
         text_result_for_llm="\n".join(text_parts),
