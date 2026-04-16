@@ -188,7 +188,7 @@ export interface CopilotClientOptions {
      * Sessions without activity for this duration are automatically cleaned up.
      * Set to 0 or omit to disable (sessions live indefinitely).
      * Minimum value: 300 (5 minutes).
-     * @default 0 (disabled)
+     * @default undefined (disabled)
      */
     sessionIdleTimeoutSeconds?: number;
 }
