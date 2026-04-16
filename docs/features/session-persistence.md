@@ -433,15 +433,15 @@ await client.deleteSession("user-123-task-456");
 
 ## Automatic Cleanup: Idle Timeout
 
-By default, sessions have **no idle timeout** and live indefinitely until explicitly disconnected or deleted. You can optionally configure a server-wide idle timeout via `CopilotClientOptions.sessionIdleTimeoutMs`:
+By default, sessions have **no idle timeout** and live indefinitely until explicitly disconnected or deleted. You can optionally configure a server-wide idle timeout via `CopilotClientOptions.sessionIdleTimeoutSeconds`:
 
 ```typescript
 const client = new CopilotClient({
-  sessionIdleTimeoutMs: 30 * 60 * 1000, // 30 minutes
+  sessionIdleTimeoutSeconds: 30 * 60, // 30 minutes
 });
 ```
 
-When a timeout is configured, sessions without activity for that duration are automatically cleaned up. The minimum value is 5 minutes (300,000ms). Set to `0` or omit to disable.
+When a timeout is configured, sessions without activity for that duration are automatically cleaned up. The minimum value is 300 seconds (5 minutes). Set to `0` or omit to disable.
 
 > **Note:** This option only applies when the SDK spawns the runtime process. When connecting to an existing server via `cliUrl`, the server's own timeout configuration applies.
 

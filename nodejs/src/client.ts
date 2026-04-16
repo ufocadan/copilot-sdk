@@ -339,7 +339,7 @@ export class CopilotClient {
             // Default useLoggedInUser to false when githubToken is provided, otherwise true
             useLoggedInUser: options.useLoggedInUser ?? (options.githubToken ? false : true),
             telemetry: options.telemetry,
-            sessionIdleTimeoutMs: options.sessionIdleTimeoutMs ?? 0,
+            sessionIdleTimeoutSeconds: options.sessionIdleTimeoutSeconds ?? 0,
         };
     }
 
@@ -1386,8 +1386,8 @@ export class CopilotClient {
                 args.push("--no-auto-login");
             }
 
-            if (this.options.sessionIdleTimeoutMs !== undefined && this.options.sessionIdleTimeoutMs > 0) {
-                args.push("--session-idle-timeout", this.options.sessionIdleTimeoutMs.toString());
+            if (this.options.sessionIdleTimeoutSeconds !== undefined && this.options.sessionIdleTimeoutSeconds > 0) {
+                args.push("--session-idle-timeout", this.options.sessionIdleTimeoutSeconds.toString());
             }
 
             // Suppress debug/trace output that might pollute stdout
