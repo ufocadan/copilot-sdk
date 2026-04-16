@@ -182,6 +182,15 @@ export interface CopilotClientOptions {
      * instead of the server's default local filesystem storage.
      */
     sessionFs?: SessionFsConfig;
+
+    /**
+     * Server-wide idle timeout for sessions in milliseconds.
+     * Sessions without activity for this duration are automatically cleaned up.
+     * Set to 0 or omit to disable (sessions live indefinitely).
+     * Minimum value: 300000 (5 minutes).
+     * @default 0 (disabled)
+     */
+    sessionIdleTimeoutMs?: number;
 }
 
 /**
