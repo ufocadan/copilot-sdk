@@ -1386,8 +1386,14 @@ export class CopilotClient {
                 args.push("--no-auto-login");
             }
 
-            if (this.options.sessionIdleTimeoutSeconds !== undefined && this.options.sessionIdleTimeoutSeconds > 0) {
-                args.push("--session-idle-timeout", this.options.sessionIdleTimeoutSeconds.toString());
+            if (
+                this.options.sessionIdleTimeoutSeconds !== undefined &&
+                this.options.sessionIdleTimeoutSeconds > 0
+            ) {
+                args.push(
+                    "--session-idle-timeout",
+                    this.options.sessionIdleTimeoutSeconds.toString()
+                );
             }
 
             // Suppress debug/trace output that might pollute stdout
