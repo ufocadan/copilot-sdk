@@ -217,9 +217,7 @@ class TestSessionIdleTimeoutSeconds:
         assert client._config.session_idle_timeout_seconds == 600
 
     def test_default_session_idle_timeout_seconds_is_none(self):
-        client = CopilotClient(
-            SubprocessConfig(cli_path=CLI_PATH, log_level="error")
-        )
+        client = CopilotClient(SubprocessConfig(cli_path=CLI_PATH, log_level="error"))
         assert isinstance(client._config, SubprocessConfig)
         assert client._config.session_idle_timeout_seconds is None
 
