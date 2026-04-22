@@ -762,6 +762,7 @@ export class CopilotClient {
                 skillDirectories: config.skillDirectories,
                 disabledSkills: config.disabledSkills,
                 infiniteSessions: config.infiniteSessions,
+                githubToken: config.githubToken,
             });
 
             const { workspacePath, capabilities } = response as {
@@ -905,6 +906,7 @@ export class CopilotClient {
                 disabledSkills: config.disabledSkills,
                 infiniteSessions: config.infiniteSessions,
                 disableResume: config.disableResume,
+                githubToken: config.githubToken,
             });
 
             const { workspacePath, capabilities } = response as {

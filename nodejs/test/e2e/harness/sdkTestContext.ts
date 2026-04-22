@@ -37,6 +37,9 @@ export async function createSdkTestContext({
     const env = {
         ...process.env,
         COPILOT_API_URL: proxyUrl,
+        // Redirect GitHub API calls (e.g., fetchCopilotUser) to the proxy
+        // so per-session auth token resolution can be tested
+        COPILOT_DEBUG_GITHUB_API_URL: proxyUrl,
 
         // TODO: I'm not convinced the SDK should default to using whatever config you happen to have in your homedir.
         // The SDK config should be independent of the regular CLI app. Likewise it shouldn't mix sessions from the

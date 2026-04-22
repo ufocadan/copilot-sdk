@@ -1341,6 +1341,18 @@ export interface SessionConfig {
     infiniteSessions?: InfiniteSessionConfig;
 
     /**
+     * GitHub token for per-session authentication.
+     * When provided, the runtime resolves this token into a full GitHub identity
+     * (login, Copilot plan, endpoints) and stores it on the session. This enables
+     * multitenancy — different sessions can have different GitHub identities.
+     *
+     * This is independent of the client-level `githubToken` in {@link CopilotClientOptions},
+     * which authenticates the CLI process itself. The session-level token determines
+     * the identity used for content exclusion, model routing, and quota checks.
+     */
+    githubToken?: string;
+
+    /**
      * Optional event handler that is registered on the session before the
      * session.create RPC is issued. This guarantees that early events emitted
      * by the CLI during session creation (e.g. session.start) are delivered to
@@ -1389,9 +1401,10 @@ export type ResumeSessionConfig = Pick<
     | "skillDirectories"
     | "disabledSkills"
     | "infiniteSessions"
+    | "githubToken"
     | "onEvent"
     | "createSessionFsHandler"
-> & {
+>& {
     /**
      * When true, skips emitting the session.resume event.
      * Useful for reconnecting to a session without triggering resume-related side effects.
